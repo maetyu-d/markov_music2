@@ -45,6 +45,20 @@ juce::Colour mutedInk() { return juce::Colour (0xffaeb5bd); }
 juce::Colour accentA() { return juce::Colour (0xffffc857); }
 juce::Colour accentB() { return juce::Colour (0xff52d1dc); }
 juce::Colour accentC() { return juce::Colour (0xfff76f8e); }
+juce::Colour selectedFill() { return juce::Colour (0xff3a3320); }
+juce::Colour inspectedFill() { return juce::Colour (0xff1c3139); }
+juce::Colour selectedRow() { return juce::Colour (0xff34313a); }
+
+juce::Colour paletteColour (int index)
+{
+    static constexpr juce::uint32 colours[] =
+    {
+        0xff52d1dc, 0xffffc857, 0xfff76f8e, 0xff7bd88f,
+        0xffb48cff, 0xffff9f68, 0xff64b5f6, 0xfff06292
+    };
+
+    return juce::Colour (colours[static_cast<size_t> (index) % std::size (colours)]);
+}
 
 juce::String defaultScriptFor (int stateIndex, int laneIndex)
 {
@@ -778,7 +792,14 @@ class GraphComponent final : public juce::Component,
 public:
     std::function<void (int)> onStateChosen;
     std::function<void (int)> onNestedBadgeChosen;
+    std::function<void (int, int)> onNestedStateChosen;
     std::function<void (int, int)> onNestedStateCountChanged;
+
+    void setInspectedMachine (MachineModel* inspected)
+    {
+        inspectedMachine = inspected;
+        repaint();
+    }
 
     explicit GraphComponent (MachineModel& machineToUse) : machine (&machineToUse)
     {
@@ -808,8 +829,22 @@ public:
     {
         for (int i = 0; i < static_cast<int> (statePositions.size()); ++i)
         {
+            if (auto* child = machine->childMachine (i))
+            {
+                const auto childState = hitTestNestedState (*child, statePositions[static_cast<size_t> (i)], event.position);
+                if (childState >= 0)
+                {
+                    if (onNestedStateChosen)
+                        onNestedStateChosen (i, childState);
+                    return;
+                }
+            }
+        }
+
+        for (int i = 0; i < static_cast<int> (statePositions.size()); ++i)
+        {
             if (machine->childMachine (i) != nullptr
-                && getNestedBadgeBounds (statePositions[static_cast<size_t> (i)]).contains (event.position))
+                && getNestedBadgeBounds (*machine->childMachine (i), statePositions[static_cast<size_t> (i)]).contains (event.position))
             {
                 if (onNestedBadgeChosen)
                     onNestedBadgeChosen (i);
@@ -836,9 +871,9 @@ public:
         for (int i = 0; i < static_cast<int> (statePositions.size()); ++i)
         {
             if (machine->childMachine (i) != nullptr
-                && getNestedBadgeBounds (statePositions[static_cast<size_t> (i)]).contains (event.position))
+                && getNestedBadgeBounds (*machine->childMachine (i), statePositions[static_cast<size_t> (i)]).contains (event.position))
             {
-                startNestedStateCountEdit (i, getNestedBadgeBounds (statePositions[static_cast<size_t> (i)]));
+                startNestedStateCountEdit (i, getNestedBadgeBounds (*machine->childMachine (i), statePositions[static_cast<size_t> (i)]));
                 return;
             }
         }
@@ -850,10 +885,14 @@ private:
         const auto count = machine->getStateCount();
         statePositions.resize (static_cast<size_t> (count));
 
-        auto area = getLocalBounds().toFloat().reduced (70.0f, 60.0f);
+        stateRadius = juce::jmap (static_cast<float> (count), 1.0f, static_cast<float> (maxStateCount), 54.0f, 34.0f);
+        stateRadius = juce::jlimit (34.0f, 54.0f, stateRadius);
+
+        const auto outerMargin = getOuterNodeExtent() + 20.0f;
+        auto area = getLocalBounds().toFloat().reduced (outerMargin, outerMargin * 0.78f);
         auto centre = area.getCentre();
-        auto rx = area.getWidth() * 0.42f;
-        auto ry = area.getHeight() * 0.38f;
+        auto rx = area.getWidth() * 0.48f;
+        auto ry = area.getHeight() * 0.44f;
 
         for (int i = 0; i < count; ++i)
         {
@@ -861,6 +900,55 @@ private:
                        - juce::MathConstants<float>::halfPi;
             statePositions[static_cast<size_t> (i)] = { centre.x + std::cos (angle) * rx,
                                                         centre.y + std::sin (angle) * ry };
+        }
+
+        relaxStatePositions (area);
+    }
+
+    void relaxStatePositions (juce::Rectangle<float> area)
+    {
+        const auto count = static_cast<int> (statePositions.size());
+        if (count < 2)
+            return;
+
+        constexpr int iterations = 90;
+        for (int pass = 0; pass < iterations; ++pass)
+        {
+            for (int a = 0; a < count; ++a)
+            {
+                for (int b = a + 1; b < count; ++b)
+                {
+                    auto& pa = statePositions[static_cast<size_t> (a)];
+                    auto& pb = statePositions[static_cast<size_t> (b)];
+                    auto delta = pb - pa;
+                    auto distance = std::sqrt (delta.x * delta.x + delta.y * delta.y);
+
+                    if (distance < 0.001f)
+                    {
+                        delta = { 1.0f, 0.0f };
+                        distance = 1.0f;
+                    }
+
+                    const auto minDistance = getNodeClearance (a) + getNodeClearance (b);
+                    if (distance >= minDistance)
+                        continue;
+
+                    delta.x /= distance;
+                    delta.y /= distance;
+
+                    const auto push = (minDistance - distance) * 0.52f;
+                    pa -= delta * push;
+                    pb += delta * push;
+                }
+            }
+
+            for (int i = 0; i < count; ++i)
+            {
+                auto& p = statePositions[static_cast<size_t> (i)];
+                const auto extent = getNodeClearance (i);
+                p.x = juce::jlimit (area.getX() + extent, area.getRight() - extent, p.x);
+                p.y = juce::jlimit (area.getY() + extent, area.getBottom() - extent, p.y);
+            }
         }
     }
 
@@ -871,8 +959,14 @@ private:
             if (rule.from >= static_cast<int> (statePositions.size()) || rule.to >= static_cast<int> (statePositions.size()))
                 continue;
 
-            auto from = statePositions[static_cast<size_t> (rule.from)];
-            auto to = statePositions[static_cast<size_t> (rule.to)];
+            auto fromCentre = statePositions[static_cast<size_t> (rule.from)];
+            auto toCentre = statePositions[static_cast<size_t> (rule.to)];
+            auto direction = toCentre - fromCentre;
+            const auto length = juce::jmax (1.0f, std::sqrt (direction.x * direction.x + direction.y * direction.y));
+            direction.x /= length;
+            direction.y /= length;
+            auto from = fromCentre + direction * (stateRadius * 1.05f);
+            auto to = toCentre - direction * (stateRadius * 1.05f);
             auto mid = (from + to) * 0.5f;
             auto centre = getLocalBounds().toFloat().getCentre();
             auto control = mid + (mid - centre) * 0.18f;
@@ -906,7 +1000,7 @@ private:
             g.setGradientFill (glow);
             g.fillEllipse (p.x - stateRadius * 1.55f, p.y - stateRadius * 1.55f, stateRadius * 3.1f, stateRadius * 3.1f);
 
-            g.setColour (selected ? juce::Colour (0xff2d2b24) : juce::Colour (0xff252a31));
+            g.setColour (selected ? selectedFill() : juce::Colour (0xff252a31));
             g.fillEllipse (p.x - stateRadius, p.y - stateRadius, stateRadius * 2.0f, stateRadius * 2.0f);
 
             g.setColour ((selected ? accentA() : mutedInk()).withAlpha (0.95f));
@@ -918,31 +1012,34 @@ private:
                 auto nestedRadius = stateRadius + 7.0f;
                 g.setColour ((selected ? accentC() : accentB()).withAlpha (selected ? 0.95f : 0.62f));
                 g.drawEllipse (p.x - nestedRadius, p.y - nestedRadius, nestedRadius * 2.0f, nestedRadius * 2.0f, 2.0f);
-                drawNestedIndicator (g, *child, p, selected);
+                drawNestedIndicator (g, *child, p, selected, child == inspectedMachine);
             }
 
             g.setColour (ink());
-            g.setFont (juce::FontOptions (16.0f, juce::Font::bold));
-            g.drawFittedText (machine->state (i).name, juce::Rectangle<int> (static_cast<int> (p.x - 50.0f),
-                                                                            static_cast<int> (p.y - 20.0f), 100, 24),
+            g.setFont (juce::FontOptions (stateRadius < 40.0f ? 13.0f : 16.0f, juce::Font::bold));
+            g.drawFittedText (machine->state (i).name, juce::Rectangle<int> (static_cast<int> (p.x - stateRadius * 0.95f),
+                                                                            static_cast<int> (p.y - stateRadius * 0.38f),
+                                                                            static_cast<int> (stateRadius * 1.9f), 22),
                               juce::Justification::centred, 1);
 
             g.setColour (mutedInk());
-            g.setFont (juce::FontOptions (12.0f));
+            g.setFont (juce::FontOptions (stateRadius < 40.0f ? 10.0f : 12.0f));
             g.drawFittedText (juce::String (laneCount) + (laneCount == 1 ? " lane" : " lanes"),
-                              juce::Rectangle<int> (static_cast<int> (p.x - 48.0f), static_cast<int> (p.y + 4.0f), 96, 20),
+                              juce::Rectangle<int> (static_cast<int> (p.x - stateRadius * 0.9f),
+                                                    static_cast<int> (p.y + stateRadius * 0.10f),
+                                                    static_cast<int> (stateRadius * 1.8f), 18),
                               juce::Justification::centred, 1);
         }
     }
 
-    void drawNestedIndicator (juce::Graphics& g, const MachineModel& child, juce::Point<float> parentCentre, bool parentSelected)
+    void drawNestedIndicator (juce::Graphics& g, const MachineModel& child, juce::Point<float> parentCentre, bool parentSelected, bool childInspected)
     {
         const auto childCount = child.getStateCount();
         if (childCount <= 0)
             return;
 
-        const auto orbitRadius = stateRadius + 16.0f;
-        const auto nodeRadius = childCount > 7 ? 3.0f : 3.7f;
+        const auto orbitRadius = getNestedOrbitRadius();
+        const auto nodeRadius = getNestedNodeRadius (childCount);
         std::vector<juce::Point<float>> childPoints;
         childPoints.reserve (static_cast<size_t> (childCount));
 
@@ -954,13 +1051,14 @@ private:
                                      parentCentre.y + std::sin (angle) * orbitRadius });
         }
 
-        g.setColour (juce::Colour (0xff11161d).withAlpha (0.86f));
-        g.fillEllipse (parentCentre.x - orbitRadius - 6.0f, parentCentre.y - orbitRadius - 6.0f,
-                       (orbitRadius + 6.0f) * 2.0f, (orbitRadius + 6.0f) * 2.0f);
+        g.setColour ((childInspected ? inspectedFill() : juce::Colour (0xff11161d)).withAlpha (childInspected ? 0.88f : 0.78f));
+        g.fillEllipse (parentCentre.x - orbitRadius - 4.0f, parentCentre.y - orbitRadius - 4.0f,
+                       (orbitRadius + 4.0f) * 2.0f, (orbitRadius + 4.0f) * 2.0f);
 
-        g.setColour ((parentSelected ? accentA() : accentC()).withAlpha (parentSelected ? 0.88f : 0.48f));
+        const auto ringColour = childInspected ? accentB() : juce::Colour (0xff6f7b88);
+        g.setColour (ringColour.withAlpha (childInspected ? 0.9f : (parentSelected ? 0.58f : 0.38f)));
         g.drawEllipse (parentCentre.x - orbitRadius, parentCentre.y - orbitRadius,
-                       orbitRadius * 2.0f, orbitRadius * 2.0f, parentSelected ? 2.0f : 1.3f);
+                       orbitRadius * 2.0f, orbitRadius * 2.0f, childInspected ? 2.4f : (parentSelected ? 2.0f : 1.3f));
 
         for (const auto& rule : child.rules)
         {
@@ -982,27 +1080,121 @@ private:
         {
             const auto point = childPoints[static_cast<size_t> (j)];
             const auto selected = j == child.selectedState;
-            g.setColour (selected ? accentA().withAlpha (0.98f) : accentC().withAlpha (0.86f));
+            const auto stateColour = paletteColour (j);
+            g.setColour ((selected && childInspected ? stateColour.brighter (0.35f) : stateColour).withAlpha (selected ? 0.98f : 0.84f));
             g.fillEllipse (point.x - nodeRadius, point.y - nodeRadius, nodeRadius * 2.0f, nodeRadius * 2.0f);
-            g.setColour (juce::Colour (0xff101318).withAlpha (0.92f));
-            g.drawEllipse (point.x - nodeRadius, point.y - nodeRadius, nodeRadius * 2.0f, nodeRadius * 2.0f, 1.0f);
+            g.setColour ((selected ? ink() : juce::Colour (0xff101318)).withAlpha (selected ? 0.82f : 0.92f));
+            g.drawEllipse (point.x - nodeRadius, point.y - nodeRadius, nodeRadius * 2.0f, nodeRadius * 2.0f, selected ? 1.4f : 1.0f);
         }
 
-        auto badge = getNestedBadgeBounds (parentCentre);
+        auto badge = getNestedBadgeBounds (child, parentCentre);
         g.setColour (juce::Colour (0xff101318).withAlpha (0.96f));
         g.fillRoundedRectangle (badge, 6.0f);
-        g.setColour ((parentSelected ? accentA() : accentC()).withAlpha (0.88f));
+        g.setColour ((childInspected ? accentB() : (parentSelected ? accentA() : accentC())).withAlpha (0.88f));
         g.drawRoundedRectangle (badge, 6.0f, 1.1f);
         g.setColour (ink());
         g.setFont (juce::FontOptions (10.5f, juce::Font::bold));
         g.drawFittedText (juce::String (childCount), badge.toNearestInt(), juce::Justification::centred, 1);
     }
 
-    juce::Rectangle<float> getNestedBadgeBounds (juce::Point<float> parentCentre) const
+    int hitTestNestedState (const MachineModel& child, juce::Point<float> parentCentre, juce::Point<float> pointer) const
     {
-        return { parentCentre.x + stateRadius - 9.0f,
-                 parentCentre.y + stateRadius - 11.0f,
-                 28.0f, 20.0f };
+        const auto childCount = child.getStateCount();
+        if (childCount <= 0)
+            return -1;
+
+        const auto orbitRadius = getNestedOrbitRadius();
+        const auto hitRadius = juce::jmax (7.0f, getNestedNodeRadius (childCount) + 5.0f);
+        for (int j = 0; j < childCount; ++j)
+        {
+            const auto angle = (juce::MathConstants<float>::twoPi * static_cast<float> (j) / static_cast<float> (childCount))
+                             - juce::MathConstants<float>::halfPi;
+            juce::Point<float> point { parentCentre.x + std::cos (angle) * orbitRadius,
+                                       parentCentre.y + std::sin (angle) * orbitRadius };
+
+            if (point.getDistanceFrom (pointer) <= hitRadius)
+                return j;
+        }
+
+        return -1;
+    }
+
+    juce::Rectangle<float> getNestedBadgeBounds (const MachineModel& child, juce::Point<float> parentCentre) const
+    {
+        const auto badgeWidth = stateRadius < 40.0f ? 24.0f : 28.0f;
+        const auto badgeHeight = stateRadius < 40.0f ? 18.0f : 20.0f;
+        const auto badgeRadius = getNestedOrbitRadius() + badgeWidth * 0.66f + 7.0f;
+        juce::Rectangle<float> best;
+        auto bestScore = -1.0f;
+
+        for (int candidate = 0; candidate < 16; ++candidate)
+        {
+            const auto angle = (-juce::MathConstants<float>::halfPi)
+                             + (juce::MathConstants<float>::twoPi * (static_cast<float> (candidate) + 0.5f) / 16.0f);
+            auto centre = juce::Point<float> { parentCentre.x + std::cos (angle) * badgeRadius,
+                                               parentCentre.y + std::sin (angle) * badgeRadius };
+            auto badge = juce::Rectangle<float> (0.0f, 0.0f, badgeWidth, badgeHeight).withCentre (centre);
+            auto score = getBadgeClearanceScore (child, parentCentre, badge);
+
+            if (score > bestScore)
+            {
+                bestScore = score;
+                best = badge;
+            }
+        }
+
+        return best;
+    }
+
+    float getBadgeClearanceScore (const MachineModel& child, juce::Point<float> parentCentre, juce::Rectangle<float> badge) const
+    {
+        const auto childCount = child.getStateCount();
+        const auto orbitRadius = getNestedOrbitRadius();
+        const auto badgeCentre = badge.getCentre();
+        auto score = std::numeric_limits<float>::max();
+
+        for (int j = 0; j < childCount; ++j)
+        {
+            const auto angle = (juce::MathConstants<float>::twoPi * static_cast<float> (j) / static_cast<float> (childCount))
+                             - juce::MathConstants<float>::halfPi;
+            auto point = juce::Point<float> { parentCentre.x + std::cos (angle) * orbitRadius,
+                                              parentCentre.y + std::sin (angle) * orbitRadius };
+            score = juce::jmin (score, point.getDistanceFrom (badgeCentre));
+        }
+
+        auto graphBounds = getLocalBounds().toFloat().reduced (8.0f);
+        if (! graphBounds.contains (badge))
+            score -= 200.0f;
+
+        return score;
+    }
+
+    float getOuterNodeExtent() const
+    {
+        for (int i = 0; i < machine->getStateCount(); ++i)
+            if (machine->childMachine (i) != nullptr)
+                return getNestedOrbitRadius() + 12.0f;
+
+        return stateRadius * 1.55f;
+    }
+
+    float getNodeClearance (int stateIndex) const
+    {
+        auto extent = stateRadius * 1.55f;
+        if (machine->childMachine (stateIndex) != nullptr)
+            extent = getNestedOrbitRadius() + 11.0f;
+
+        return extent + 8.0f;
+    }
+
+    float getNestedOrbitRadius() const
+    {
+        return stateRadius + juce::jmap (stateRadius, 34.0f, 54.0f, 10.0f, 16.0f);
+    }
+
+    float getNestedNodeRadius (int childCount) const
+    {
+        return childCount > 7 || stateRadius < 40.0f ? 2.5f : 3.7f;
     }
 
     void startNestedStateCountEdit (int parentStateIndex, juce::Rectangle<float> badgeBounds)
@@ -1058,6 +1250,7 @@ private:
     void timerCallback() override { repaint(); }
 
     MachineModel* machine;
+    MachineModel* inspectedMachine = nullptr;
     std::vector<juce::Point<float>> statePositions;
     std::unique_ptr<juce::TextEditor> nestedCountEditor;
     float stateRadius = 48.0f;
@@ -1075,26 +1268,39 @@ public:
         addAndMakeVisible (toBox);
         addAndMakeVisible (weightSlider);
         addAndMakeVisible (addButton);
+        addAndMakeVisible (updateButton);
+        addAndMakeVisible (removeButton);
         addAndMakeVisible (ringButton);
 
         weightSlider.setRange (0.1, 5.0, 0.1);
         weightSlider.setValue (1.0);
         weightSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 56, 22);
 
-        addButton.setButtonText ("Add rule");
+        addButton.setButtonText ("Add");
+        updateButton.setButtonText ("Save");
+        removeButton.setButtonText ("Delete");
         ringButton.setButtonText ("Ring rules");
 
         addButton.onClick = [this]
         {
-            machine->rules.push_back ({ fromBox.getSelectedItemIndex(), toBox.getSelectedItemIndex(),
-                                       static_cast<float> (weightSlider.getValue()) });
-            if (onRulesChanged)
-                onRulesChanged();
+            addRuleFromControls();
+        };
+
+        updateButton.onClick = [this]
+        {
+            updateSelectedRule();
+        };
+
+        removeButton.onClick = [this]
+        {
+            removeSelectedRule();
         };
 
         ringButton.onClick = [this]
         {
             machine->regenerateRingRules();
+            selectedRuleIndex = -1;
+            refreshChoices();
             if (onRulesChanged)
                 onRulesChanged();
         };
@@ -1105,6 +1311,7 @@ public:
     void setMachine (MachineModel& modelToUse)
     {
         machine = &modelToUse;
+        selectedRuleIndex = -1;
         refreshChoices();
         repaint();
     }
@@ -1120,8 +1327,16 @@ public:
             fromBox.addItem (machine->state (i).name, i + 1);
             toBox.addItem (machine->state (i).name, i + 1);
         }
-        fromBox.setSelectedItemIndex (machine->selectedState);
-        toBox.setSelectedItemIndex ((machine->selectedState + 1) % machine->getStateCount());
+        selectedRuleIndex = selectedRuleIndex >= static_cast<int> (machine->rules.size()) ? -1 : selectedRuleIndex;
+
+        if (selectedRuleIndex >= 0)
+            loadRuleIntoControls (selectedRuleIndex);
+        else
+        {
+            fromBox.setSelectedItemIndex (machine->selectedState);
+            toBox.setSelectedItemIndex ((machine->selectedState + 1) % machine->getStateCount());
+            weightSlider.setValue (1.0, juce::dontSendNotification);
+        }
     }
 
     void paint (juce::Graphics& g) override
@@ -1131,38 +1346,129 @@ public:
         g.setFont (juce::FontOptions (15.0f, juce::Font::bold));
         g.drawText ("Transition rules", getLocalBounds().removeFromTop (28), juce::Justification::centredLeft);
 
-        auto list = getLocalBounds().withTrimmedTop (72).reduced (0, 6);
+        auto list = getRuleListBounds();
         g.setFont (juce::FontOptions (12.5f));
 
         for (int i = 0; i < static_cast<int> (machine->rules.size()); ++i)
         {
-            auto row = list.removeFromTop (24);
+            auto row = list.removeFromTop (26);
             const auto& r = machine->rules[static_cast<size_t> (i)];
-            g.setColour (i % 2 == 0 ? juce::Colour (0xff20252c) : juce::Colour (0xff1b2026));
+            const auto selected = i == selectedRuleIndex;
+            g.setColour (selected ? selectedRow() : (i % 2 == 0 ? juce::Colour (0xff20252c) : juce::Colour (0xff1b2026)));
             g.fillRoundedRectangle (row.toFloat().reduced (1.0f), 4.0f);
-            g.setColour (mutedInk());
-            g.drawText (machine->state (r.from).name + "  ->  " + machine->state (r.to).name + "    w " + juce::String (r.weight, 1),
-                        row.reduced (8, 0), juce::Justification::centredLeft);
+            if (selected)
+            {
+                g.setColour (accentC().withAlpha (0.88f));
+                g.fillRoundedRectangle (row.removeFromLeft (4).toFloat().reduced (0.0f, 4.0f), 2.0f);
+            }
+
+            g.setColour (selected ? ink() : mutedInk());
+
+            auto rowArea = row.reduced (8, 0);
+            g.drawText (machine->state (r.from).name, rowArea.removeFromLeft (96), juce::Justification::centredLeft);
+            g.drawText ("->", rowArea.removeFromLeft (24), juce::Justification::centred);
+            g.drawText (machine->state (r.to).name, rowArea.removeFromLeft (96), juce::Justification::centredLeft);
+            g.drawText ("w " + juce::String (r.weight, 1), rowArea.removeFromRight (52), juce::Justification::centredRight);
+        }
+    }
+
+    void mouseDown (const juce::MouseEvent& event) override
+    {
+        auto list = getRuleListBounds();
+        for (int i = 0; i < static_cast<int> (machine->rules.size()); ++i)
+        {
+            auto row = list.removeFromTop (26);
+            if (row.contains (event.getPosition()))
+            {
+                selectedRuleIndex = i;
+                loadRuleIntoControls (i);
+                repaint();
+                return;
+            }
         }
     }
 
     void resized() override
     {
         auto area = getLocalBounds().reduced (0, 30).removeFromTop (36);
-        fromBox.setBounds (area.removeFromLeft (92).reduced (0, 4));
-        toBox.setBounds (area.removeFromLeft (92).reduced (4));
-        weightSlider.setBounds (area.removeFromLeft (108).reduced (4));
-        addButton.setBounds (area.removeFromLeft (82).reduced (4));
-        ringButton.setBounds (area.removeFromLeft (92).reduced (4));
+        fromBox.setBounds (area.removeFromLeft (82).reduced (0, 4));
+        toBox.setBounds (area.removeFromLeft (82).reduced (4));
+        weightSlider.setBounds (area.removeFromLeft (96).reduced (4));
+        addButton.setBounds (area.removeFromLeft (54).reduced (4));
+        updateButton.setBounds (area.removeFromLeft (58).reduced (4));
+        removeButton.setBounds (area.removeFromLeft (62).reduced (4));
+        ringButton.setBounds (area.removeFromLeft (82).reduced (4));
     }
 
 private:
+    juce::Rectangle<int> getRuleListBounds() const
+    {
+        return getLocalBounds().withTrimmedTop (76).reduced (0, 6);
+    }
+
+    void addRuleFromControls()
+    {
+        auto from = fromBox.getSelectedItemIndex();
+        auto to = toBox.getSelectedItemIndex();
+        if (from < 0 || to < 0)
+            return;
+
+        machine->rules.push_back ({ from, to, static_cast<float> (weightSlider.getValue()) });
+        selectedRuleIndex = static_cast<int> (machine->rules.size()) - 1;
+        if (onRulesChanged)
+            onRulesChanged();
+        repaint();
+    }
+
+    void updateSelectedRule()
+    {
+        if (selectedRuleIndex < 0 || selectedRuleIndex >= static_cast<int> (machine->rules.size()))
+            return;
+
+        auto from = fromBox.getSelectedItemIndex();
+        auto to = toBox.getSelectedItemIndex();
+        if (from < 0 || to < 0)
+            return;
+
+        machine->rules[static_cast<size_t> (selectedRuleIndex)] = { from, to, static_cast<float> (weightSlider.getValue()) };
+        if (onRulesChanged)
+            onRulesChanged();
+        repaint();
+    }
+
+    void removeSelectedRule()
+    {
+        if (selectedRuleIndex < 0 || selectedRuleIndex >= static_cast<int> (machine->rules.size()))
+            return;
+
+        machine->rules.erase (machine->rules.begin() + selectedRuleIndex);
+        selectedRuleIndex = juce::jmin (selectedRuleIndex, static_cast<int> (machine->rules.size()) - 1);
+        refreshChoices();
+        if (onRulesChanged)
+            onRulesChanged();
+        repaint();
+    }
+
+    void loadRuleIntoControls (int index)
+    {
+        if (index < 0 || index >= static_cast<int> (machine->rules.size()))
+            return;
+
+        const auto& rule = machine->rules[static_cast<size_t> (index)];
+        fromBox.setSelectedItemIndex (rule.from, juce::dontSendNotification);
+        toBox.setSelectedItemIndex (rule.to, juce::dontSendNotification);
+        weightSlider.setValue (rule.weight, juce::dontSendNotification);
+    }
+
     MachineModel* machine;
     juce::ComboBox fromBox;
     juce::ComboBox toBox;
     juce::Slider weightSlider;
     juce::TextButton addButton;
+    juce::TextButton updateButton;
+    juce::TextButton removeButton;
     juce::TextButton ringButton;
+    int selectedRuleIndex = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RuleListComponent)
 };
@@ -1215,14 +1521,123 @@ public:
             auto cell = area.removeFromLeft (i == static_cast<int> (buttons.size()) - 1 ? area.getWidth() : width);
             buttons[static_cast<size_t> (i)]->setBounds (cell.reduced (2, 1));
             buttons[static_cast<size_t> (i)]->setColour (juce::TextButton::buttonColourId,
-                                                         i == selectedIndex ? accentA().darker (0.55f) : juce::Colour (0xff252a31));
+                                                         i == selectedIndex ? selectedFill() : juce::Colour (0xff252a31));
+            buttons[static_cast<size_t> (i)]->setColour (juce::TextButton::buttonOnColourId, selectedFill());
             buttons[static_cast<size_t> (i)]->setColour (juce::TextButton::textColourOffId,
-                                                         i == selectedIndex ? ink() : mutedInk());
+                                                         i == selectedIndex ? accentA().brighter (0.2f) : mutedInk());
         }
     }
 
 private:
     std::vector<std::unique_ptr<juce::TextButton>> buttons;
+    int selectedIndex = 0;
+};
+
+class ClickableLabel final : public juce::Label
+{
+public:
+    std::function<void()> onClick;
+
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        if (onClick)
+            onClick();
+    }
+};
+
+class TrackListComponent final : public juce::Component
+{
+public:
+    std::function<void (int)> onTrackSelected;
+
+    void setState (State& stateToShow, int selectedLane)
+    {
+        state = &stateToShow;
+        selectedIndex = selectedLane;
+        repaint();
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto bounds = getLocalBounds();
+        g.setColour (juce::Colour (0xff181b20));
+        g.fillRoundedRectangle (bounds.toFloat(), 7.0f);
+
+        g.setColour (ink());
+        g.setFont (juce::FontOptions (13.5f, juce::Font::bold));
+        g.drawText ("Tracks", bounds.removeFromTop (28).reduced (10, 0), juce::Justification::centredLeft);
+
+        if (state == nullptr)
+            return;
+
+        auto list = getTrackListBounds();
+        for (int i = 0; i < static_cast<int> (state->lanes.size()); ++i)
+        {
+            auto row = list.removeFromTop (34).reduced (0, 3);
+            const auto& lane = state->lanes[static_cast<size_t> (i)];
+            const auto selected = i == selectedIndex;
+
+            const auto laneColour = getTrackColour (i);
+            g.setColour (selected ? selectedRow() : juce::Colour (0xff20252c));
+            g.fillRoundedRectangle (row.toFloat(), 5.0f);
+            if (selected)
+            {
+                g.setColour (laneColour.withAlpha (0.45f));
+                g.fillRoundedRectangle (row.removeFromLeft (5).toFloat(), 3.0f);
+            }
+
+            g.setColour (selected ? laneColour.withAlpha (0.95f) : juce::Colour (0xff414a55));
+            g.drawRoundedRectangle (row.toFloat(), 5.0f, selected ? 1.4f : 0.8f);
+
+            auto rowText = row.reduced (10, 0);
+            auto dotArea = rowText.removeFromLeft (12).withSizeKeepingCentre (8, 8).toFloat();
+            g.setColour (laneColour.withAlpha (lane.playing ? 0.96f : 0.72f));
+            g.fillEllipse (dotArea);
+            g.setColour (lane.playing ? ink().withAlpha (0.85f) : juce::Colour (0xff101318).withAlpha (0.8f));
+            g.drawEllipse (dotArea.expanded (1.0f), lane.playing ? 1.4f : 0.8f);
+
+            g.setColour (selected ? ink() : mutedInk());
+            g.setFont (juce::FontOptions (12.5f, selected ? juce::Font::bold : juce::Font::plain));
+            g.drawFittedText (lane.name, rowText.removeFromLeft (84), juce::Justification::centredLeft, 1);
+
+            g.setColour (lane.playing ? accentA() : mutedInk().withAlpha (0.68f));
+            g.setFont (juce::FontOptions (10.5f));
+            g.drawFittedText (lane.playing ? "live" : "script", rowText, juce::Justification::centredRight, 1);
+        }
+    }
+
+    void mouseDown (const juce::MouseEvent& event) override
+    {
+        if (state == nullptr)
+            return;
+
+        auto list = getTrackListBounds();
+        for (int i = 0; i < static_cast<int> (state->lanes.size()); ++i)
+        {
+            auto row = list.removeFromTop (34).reduced (0, 3);
+            if (row.contains (event.getPosition()))
+            {
+                selectedIndex = i;
+                if (onTrackSelected)
+                    onTrackSelected (i);
+                repaint();
+                return;
+            }
+        }
+    }
+
+private:
+    juce::Colour getTrackColour (int index) const
+    {
+        return paletteColour (index);
+    }
+
+    juce::Rectangle<int> getTrackListBounds() const
+    {
+        return getLocalBounds().withTrimmedTop (32).reduced (8, 4);
+    }
+
+    State* state = nullptr;
     int selectedIndex = 0;
 };
 
@@ -1237,7 +1652,10 @@ public:
         addAndMakeVisible (statusLabel);
         addAndMakeVisible (logButton);
         addAndMakeVisible (panicButton);
-        addAndMakeVisible (stateCount);
+        addAndMakeVisible (topStateCountLabel);
+        addAndMakeVisible (topStateCountMinus);
+        addAndMakeVisible (topStateCountEditor);
+        addAndMakeVisible (topStateCountPlus);
         addAndMakeVisible (runButton);
         addAndMakeVisible (stepButton);
         addAndMakeVisible (stopAllButton);
@@ -1245,19 +1663,17 @@ public:
         addAndMakeVisible (graph);
         addAndMakeVisible (rules);
         addAndMakeVisible (stateTabs);
-        addAndMakeVisible (laneTabs);
+        addAndMakeVisible (trackList);
         addAndMakeVisible (scriptEditor);
         addAndMakeVisible (addLaneButton);
         addAndMakeVisible (removeLaneButton);
         addAndMakeVisible (addChildMachineButton);
         addAndMakeVisible (enterChildMachineButton);
         addAndMakeVisible (exitChildMachineButton);
-        addAndMakeVisible (bootAudioButton);
         addAndMakeVisible (playButton);
         addAndMakeVisible (stopButton);
-        addAndMakeVisible (sclangPath);
 
-        title.setText ("Markov Finite-State Machine", juce::dontSendNotification);
+        title.setText ("Markov FSM", juce::dontSendNotification);
         title.setFont (juce::FontOptions (25.0f, juce::Font::bold));
         title.setColour (juce::Label::textColourId, ink());
 
@@ -1265,6 +1681,11 @@ public:
         statusLabel.setFont (juce::FontOptions (13.0f));
         statusLabel.setColour (juce::Label::textColourId, mutedInk());
         statusLabel.setJustificationType (juce::Justification::centredRight);
+        statusLabel.setMouseCursor (juce::MouseCursor::PointingHandCursor);
+        statusLabel.onClick = [this]
+        {
+            startPrepareJob (false);
+        };
 
         logButton.setButtonText ("Log");
         panicButton.setButtonText ("Panic");
@@ -1290,16 +1711,26 @@ public:
             appendLog (message);
         };
 
-        stateCount.setRange (1, maxStateCount, 1);
-        stateCount.setValue (currentMachine().getStateCount());
-        stateCount.setTextBoxStyle (juce::Slider::TextBoxRight, false, 44, 22);
-        stateCount.onValueChange = [this]
-        {
-            stopMachineRecursive (machine);
-            currentMachine().setStateCount (static_cast<int> (stateCount.getValue()));
-            markMachineDirty();
-            refreshControls();
-        };
+        topStateCountLabel.setText ("Top states", juce::dontSendNotification);
+        topStateCountLabel.setFont (juce::FontOptions (12.5f, juce::Font::bold));
+        topStateCountLabel.setColour (juce::Label::textColourId, mutedInk());
+        topStateCountLabel.setJustificationType (juce::Justification::centredRight);
+
+        topStateCountMinus.setButtonText ("-");
+        topStateCountPlus.setButtonText ("+");
+        topStateCountMinus.onClick = [this] { setTopLevelStateCount (machine.getStateCount() - 1); };
+        topStateCountPlus.onClick = [this] { setTopLevelStateCount (machine.getStateCount() + 1); };
+
+        topStateCountEditor.setText (juce::String (machine.getStateCount()), false);
+        topStateCountEditor.setInputRestrictions (2, "0123456789");
+        topStateCountEditor.setJustification (juce::Justification::centred);
+        topStateCountEditor.setSelectAllWhenFocused (true);
+        topStateCountEditor.setColour (juce::TextEditor::backgroundColourId, juce::Colour (0xff181b20));
+        topStateCountEditor.setColour (juce::TextEditor::textColourId, ink());
+        topStateCountEditor.setColour (juce::TextEditor::outlineColourId, juce::Colour (0xff333a44));
+        topStateCountEditor.setColour (juce::TextEditor::focusedOutlineColourId, accentA());
+        topStateCountEditor.onReturnKey = [this] { commitTopLevelStateCountEditor(); };
+        topStateCountEditor.onFocusLost = [this] { commitTopLevelStateCountEditor(); };
 
         runButton.setButtonText ("Run FSM");
         stepButton.setButtonText ("Step");
@@ -1373,9 +1804,9 @@ public:
             refreshControls();
         };
 
-        laneTabs.onIndexSelected = [this] (int newIndex)
+        trackList.onTrackSelected = [this] (int newIndex)
         {
-            currentMachine().selectedLane = newIndex;
+            currentInspectorMachine().selectedLane = newIndex;
             refreshControls();
         };
 
@@ -1387,8 +1818,8 @@ public:
         scriptEditor.setColour (juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
         scriptEditor.onTextChange = [this]
         {
-            currentMachine().selectedLaneRef().script = scriptEditor.getText();
-            currentMachine().selectedLaneRef().preparedBridge = -1;
+            currentInspectorMachine().selectedLaneRef().script = scriptEditor.getText();
+            currentInspectorMachine().selectedLaneRef().preparedBridge = -1;
             markMachineDirty();
         };
 
@@ -1397,22 +1828,20 @@ public:
         addChildMachineButton.setButtonText ("+ FSM");
         enterChildMachineButton.setButtonText ("Enter");
         exitChildMachineButton.setButtonText ("Back");
-        bootAudioButton.setButtonText ("Boot audio");
         playButton.setButtonText ("Play");
         stopButton.setButtonText ("Stop");
-        sclangPath.setTextToShowWhenEmpty ("sclang path (optional)", mutedInk());
 
         addLaneButton.onClick = [this]
         {
-            currentMachine().addLaneToSelectedState();
+            currentInspectorMachine().addLaneToSelectedState();
             markMachineDirty();
             refreshControls();
         };
 
         removeLaneButton.onClick = [this]
         {
-            host.stop (currentMachine().selectedLaneRef());
-            currentMachine().removeSelectedLane();
+            host.stop (currentInspectorMachine().selectedLaneRef());
+            currentInspectorMachine().removeSelectedLane();
             markMachineDirty();
             refreshControls();
         };
@@ -1443,26 +1872,21 @@ public:
             }
         };
 
-        bootAudioButton.onClick = [this]
-        {
-            startPrepareJob (false);
-        };
-
         playButton.onClick = [this]
         {
-            host.play (currentMachine().selectedLaneRef(), sclangPath.getText());
+            host.play (currentInspectorMachine().selectedLaneRef(), getSclangPathOverride());
             refreshControls();
         };
 
         stopButton.onClick = [this]
         {
-            host.stop (currentMachine().selectedLaneRef());
+            host.stop (currentInspectorMachine().selectedLaneRef());
             refreshControls();
         };
 
         graph.onStateChosen = [this] (int)
         {
-            rules.setMachine (currentMachine());
+            inspectedMachine = &currentMachine();
             refreshControls();
         };
 
@@ -1471,10 +1895,21 @@ public:
             if (auto* child = currentMachine().childMachine (parentStateIndex))
             {
                 currentMachine().selectedState = parentStateIndex;
-                rules.setMachine (*child);
-                rules.refreshChoices();
-                graph.repaint();
-                rules.repaint();
+                child->selectedLane = 0;
+                inspectedMachine = child;
+                refreshControls();
+            }
+        };
+
+        graph.onNestedStateChosen = [this] (int parentStateIndex, int childStateIndex)
+        {
+            if (auto* child = currentMachine().childMachine (parentStateIndex))
+            {
+                currentMachine().selectedState = parentStateIndex;
+                child->selectedState = childStateIndex;
+                child->selectedLane = 0;
+                inspectedMachine = child;
+                refreshControls();
             }
         };
 
@@ -1530,7 +1965,11 @@ public:
         auto area = getLocalBounds().reduced (18);
         auto header = area.removeFromTop (46);
         title.setBounds (header.removeFromLeft (360));
-        stateCount.setBounds (header.removeFromRight (160).reduced (0, 8));
+        auto topCountArea = header.removeFromRight (188).reduced (0, 8);
+        topStateCountLabel.setBounds (topCountArea.removeFromLeft (76));
+        topStateCountMinus.setBounds (topCountArea.removeFromLeft (28).reduced (2, 0));
+        topStateCountEditor.setBounds (topCountArea.removeFromLeft (42).reduced (2, 0));
+        topStateCountPlus.setBounds (topCountArea.removeFromLeft (28).reduced (2, 0));
         rateSlider.setBounds (header.removeFromRight (150).reduced (6, 8));
         logButton.setBounds (header.removeFromRight (56).reduced (4, 8));
         panicButton.setBounds (header.removeFromRight (74).reduced (4, 8));
@@ -1549,12 +1988,11 @@ public:
         addChildMachineButton.setBounds (laneHeader.removeFromLeft (70).reduced (3));
         enterChildMachineButton.setBounds (laneHeader.removeFromLeft (66).reduced (3));
         exitChildMachineButton.setBounds (laneHeader.removeFromLeft (62).reduced (3));
-        bootAudioButton.setBounds (laneHeader.removeFromLeft (96).reduced (3));
         playButton.setBounds (laneHeader.removeFromLeft (72).reduced (3));
         stopButton.setBounds (laneHeader.removeFromLeft (72).reduced (3));
-        sclangPath.setBounds (laneHeader.reduced (8, 3));
-        laneTabs.setBounds (laneArea.removeFromTop (32));
-        scriptEditor.setBounds (laneArea.reduced (0, 6));
+        auto laneBody = laneArea.reduced (0, 6);
+        trackList.setBounds (laneBody.removeFromLeft (176));
+        scriptEditor.setBounds (laneBody.reduced (10, 0));
 
         stateTabs.setBounds (area.removeFromTop (36));
         auto graphArea = area.reduced (0, 10);
@@ -1570,12 +2008,52 @@ private:
         return *activeMachine;
     }
 
+    MachineModel& currentInspectorMachine() const
+    {
+        return inspectedMachine != nullptr ? *inspectedMachine : *activeMachine;
+    }
+
+    juce::String getSclangPathOverride() const
+    {
+        return {};
+    }
+
     void setActiveMachine (MachineModel& newMachine)
     {
         activeMachine = &newMachine;
+        inspectedMachine = &newMachine;
         graph.setMachine (newMachine);
+        graph.setInspectedMachine (&newMachine);
         rules.setMachine (newMachine);
-        stateCount.setValue (newMachine.getStateCount(), juce::dontSendNotification);
+        topStateCountEditor.setText (juce::String (machine.getStateCount()), false);
+        refreshControls();
+    }
+
+    void commitTopLevelStateCountEditor()
+    {
+        setTopLevelStateCount (topStateCountEditor.getText().getIntValue());
+    }
+
+    void setTopLevelStateCount (int newCount)
+    {
+        newCount = juce::jlimit (1, maxStateCount, newCount);
+        topStateCountEditor.setText (juce::String (newCount), false);
+
+        if (newCount == machine.getStateCount())
+            return;
+
+        fsmRunning = false;
+        stopTransport();
+        host.stopAll (machine);
+        runButton.setButtonText ("Run FSM");
+
+        machineStack.clear();
+        activeMachine = &machine;
+        machine.setStateCount (newCount);
+        graph.setMachine (machine);
+        graph.setInspectedMachine (&machine);
+        rules.setMachine (machine);
+        markMachineDirty();
         refreshControls();
     }
 
@@ -1639,10 +2117,10 @@ private:
             return;
 
         runButton.setButtonText (startAfterPrepare ? "Starting..." : "Run FSM");
-        bootAudioButton.setButtonText ("Booting...");
+        statusLabel.setText ("Booting audio", juce::dontSendNotification);
 
         auto lanes = makeLaneSnapshots();
-        auto path = sclangPath.getText();
+        auto path = getSclangPathOverride();
         auto safeThis = juce::Component::SafePointer<MainComponent> (this);
 
         juce::Thread::launch ([safeThis, lanes, path, startAfterPrepare]
@@ -1667,7 +2145,6 @@ private:
                     return;
 
                 safeThis->audioJobRunning = false;
-                safeThis->bootAudioButton.setButtonText ("Boot audio");
 
                 if (preparedBridge >= 0)
                 {
@@ -1779,14 +2256,14 @@ private:
     void playState (int stateIndex)
     {
         for (auto& lane : currentMachine().state (stateIndex).lanes)
-            host.play (lane, sclangPath.getText());
+            host.play (lane, getSclangPathOverride());
     }
 
     void prepareAllLanes()
     {
         for (auto& state : currentMachine().states)
             for (auto& lane : state.lanes)
-                host.prepare (lane, sclangPath.getText());
+                host.prepare (lane, getSclangPathOverride());
     }
 
     void stopState (int stateIndex)
@@ -1866,7 +2343,7 @@ private:
         model.selectedLane = 0;
 
         for (auto& lane : model.state (stateIndex).lanes)
-            host.play (lane, sclangPath.getText());
+            host.play (lane, getSclangPathOverride());
 
         if (auto* child = model.childMachine (stateIndex))
             startMachine (*child, child->selectedState);
@@ -1887,17 +2364,19 @@ private:
     void refreshControls()
     {
         refreshStateTabs();
-        refreshLaneTabs();
-        rules.refreshChoices();
+        refreshTrackList();
+        rules.setMachine (currentInspectorMachine());
 
-        scriptEditor.setText (currentMachine().selectedLaneRef().script, juce::dontSendNotification);
-        playButton.setColour (juce::TextButton::buttonColourId, currentMachine().selectedLaneRef().playing ? accentA().darker (0.2f) : accentB().darker (0.35f));
+        scriptEditor.setText (currentInspectorMachine().selectedLaneRef().script, juce::dontSendNotification);
+        topStateCountEditor.setText (juce::String (machine.getStateCount()), false);
+        playButton.setColour (juce::TextButton::buttonColourId, currentInspectorMachine().selectedLaneRef().playing ? accentA().darker (0.2f) : accentB().darker (0.35f));
         const auto hasChild = currentMachine().hasChildMachine (currentMachine().selectedState);
         addChildMachineButton.setEnabled (! hasChild);
         enterChildMachineButton.setEnabled (hasChild);
         exitChildMachineButton.setEnabled (! machineStack.empty());
         graph.repaint();
         rules.repaint();
+        graph.setInspectedMachine (&currentInspectorMachine());
     }
 
     void refreshStateTabs()
@@ -1909,47 +2388,43 @@ private:
         stateTabs.setItems (names, currentMachine().selectedState);
     }
 
-    void refreshLaneTabs()
+    void refreshTrackList()
     {
-        juce::StringArray names;
-        auto& s = currentMachine().state (currentMachine().selectedState);
-        for (int i = 0; i < static_cast<int> (s.lanes.size()); ++i)
-        {
-            auto& lane = s.lanes[static_cast<size_t> (i)];
-            names.add (lane.name + (lane.playing ? " *" : ""));
-        }
-
-        laneTabs.setItems (names, currentMachine().selectedLane);
+        auto& inspected = currentInspectorMachine();
+        auto& s = inspected.state (inspected.selectedState);
+        trackList.setState (s, inspected.selectedLane);
     }
 
     MachineModel machine;
     MachineModel* activeMachine = &machine;
+    MachineModel* inspectedMachine = &machine;
     std::vector<MachineModel*> machineStack;
     SuperColliderHost host;
     GraphComponent graph;
     RuleListComponent rules;
 
     juce::Label title;
-    juce::Label statusLabel;
+    ClickableLabel statusLabel;
     juce::TextButton logButton;
     juce::TextButton panicButton;
-    juce::Slider stateCount;
+    juce::Label topStateCountLabel;
+    juce::TextButton topStateCountMinus;
+    juce::TextEditor topStateCountEditor;
+    juce::TextButton topStateCountPlus;
     juce::TextButton runButton;
     juce::TextButton stepButton;
     juce::TextButton stopAllButton;
     juce::Slider rateSlider;
     PillBar stateTabs;
-    PillBar laneTabs;
+    TrackListComponent trackList;
     juce::TextEditor scriptEditor;
     juce::TextButton addLaneButton;
     juce::TextButton removeLaneButton;
     juce::TextButton addChildMachineButton;
     juce::TextButton enterChildMachineButton;
     juce::TextButton exitChildMachineButton;
-    juce::TextButton bootAudioButton;
     juce::TextButton playButton;
     juce::TextButton stopButton;
-    juce::TextEditor sclangPath;
     juce::TextEditor logView;
     juce::String scLog;
     bool logVisible = false;
