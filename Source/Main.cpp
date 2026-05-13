@@ -18,6 +18,27 @@ enum class LatencyProfile
     ultra
 };
 
+enum class NestedTimingMode
+{
+    followParent,
+    freeRun,
+    oneShot,
+    latch
+};
+
+juce::String nestedTimingModeName (NestedTimingMode mode)
+{
+    switch (mode)
+    {
+        case NestedTimingMode::followParent: return "Follow";
+        case NestedTimingMode::freeRun: return "Free-run";
+        case NestedTimingMode::oneShot: return "One-shot";
+        case NestedTimingMode::latch: return "Latch";
+    }
+
+    return "Follow";
+}
+
 constexpr auto activeLatencyProfile = LatencyProfile::low;
 constexpr bool enableHiddenCrossfades = true;
 
@@ -130,6 +151,9 @@ struct Lane
     juce::String id;
     juce::String name;
     juce::String script;
+    bool enabled = true;
+    bool muted = false;
+    bool solo = false;
     bool playing = false;
     int preparedBridge = -1;
 };
@@ -179,7 +203,7 @@ public:
             states[static_cast<size_t> (i)].index = i;
             states[static_cast<size_t> (i)].name = "State " + juce::String (i + 1);
             states[static_cast<size_t> (i)].lanes.push_back (
-                { makeLaneId (i, 0), "Lane 1", defaultScriptFor (i, 0), false });
+                { makeLaneId (i, 0), "Lane 1", defaultScriptFor (i, 0) });
         }
 
         for (int i = 0; i < newCount; ++i)
@@ -212,8 +236,7 @@ public:
         const auto laneIndex = static_cast<int> (s.lanes.size());
         s.lanes.push_back ({ makeLaneId (selectedState, laneIndex),
                              "Lane " + juce::String (laneIndex + 1),
-                             defaultScriptFor (selectedState, laneIndex),
-                             false });
+                             defaultScriptFor (selectedState, laneIndex) });
         selectedLane = laneIndex;
     }
 
@@ -225,6 +248,18 @@ public:
 
         s.lanes.erase (s.lanes.begin() + selectedLane);
         selectedLane = juce::jlimit (0, static_cast<int> (s.lanes.size()) - 1, selectedLane);
+    }
+
+    void moveSelectedLane (int offset)
+    {
+        auto& s = state (selectedState);
+        const auto count = static_cast<int> (s.lanes.size());
+        const auto target = juce::jlimit (0, count - 1, selectedLane + offset);
+        if (target == selectedLane)
+            return;
+
+        std::swap (s.lanes[static_cast<size_t> (selectedLane)], s.lanes[static_cast<size_t> (target)]);
+        selectedLane = target;
     }
 
     void regenerateRingRules()
@@ -273,6 +308,11 @@ public:
     std::vector<Rule> rules;
     juce::String machineId;
     juce::String lanePrefix;
+    NestedTimingMode timingMode = NestedTimingMode::followParent;
+    int parentDivision = 1;
+    int parentTickCounter = 0;
+    bool oneShotComplete = false;
+    bool latchedActive = false;
     int selectedState = 0;
     int selectedLane = 0;
     int entryState = 0;
@@ -1553,6 +1593,9 @@ class TrackListComponent final : public juce::Component
 {
 public:
     std::function<void (int)> onTrackSelected;
+    std::function<void (int)> onEnabledToggled;
+    std::function<void (int)> onMuteToggled;
+    std::function<void (int)> onSoloToggled;
 
     void setState (State& stateToShow, int selectedLane)
     {
@@ -1573,12 +1616,12 @@ public:
         auto list = getTrackListBounds();
         for (int i = 0; i < static_cast<int> (state->lanes.size()); ++i)
         {
-            auto row = list.removeFromTop (34).reduced (0, 3);
+            auto row = list.removeFromTop (43).reduced (0, 4);
             const auto& lane = state->lanes[static_cast<size_t> (i)];
             const auto selected = i == selectedIndex;
 
             const auto laneColour = getTrackColour (i);
-            g.setColour (selected ? selectedRow() : juce::Colour (0xff20252c));
+            g.setColour (selected ? selectedRow() : juce::Colour (0xff20252c).withAlpha (lane.enabled ? 1.0f : 0.48f));
             g.fillRoundedRectangle (row.toFloat(), 5.0f);
             if (selected)
             {
@@ -1591,18 +1634,19 @@ public:
 
             auto rowText = row.reduced (10, 0);
             auto dotArea = rowText.removeFromLeft (12).withSizeKeepingCentre (8, 8).toFloat();
-            g.setColour (laneColour.withAlpha (lane.playing ? 0.96f : 0.72f));
+            g.setColour (laneColour.withAlpha (lane.enabled ? (lane.playing ? 0.96f : 0.72f) : 0.28f));
             g.fillEllipse (dotArea);
             g.setColour (lane.playing ? ink().withAlpha (0.85f) : juce::Colour (0xff101318).withAlpha (0.8f));
             g.drawEllipse (dotArea.expanded (1.0f), lane.playing ? 1.4f : 0.8f);
 
-            g.setColour (selected ? ink() : mutedInk());
-            g.setFont (juce::FontOptions (12.5f, selected ? juce::Font::bold : juce::Font::plain));
-            g.drawFittedText (lane.name, rowText.removeFromLeft (84), juce::Justification::centredLeft, 1);
+            auto buttons = rowText.removeFromRight (82);
+            drawToggle (g, buttons.removeFromLeft (25), "E", lane.enabled, accentB());
+            drawToggle (g, buttons.removeFromLeft (25), "M", lane.muted, accentC());
+            drawToggle (g, buttons.removeFromLeft (25), "S", lane.solo, accentA());
 
-            g.setColour (lane.playing ? accentA() : mutedInk().withAlpha (0.68f));
-            g.setFont (juce::FontOptions (10.5f));
-            g.drawFittedText (lane.playing ? "live" : "script", rowText, juce::Justification::centredRight, 1);
+            g.setColour (selected ? ink() : mutedInk().withAlpha (lane.enabled ? 1.0f : 0.52f));
+            g.setFont (juce::FontOptions (12.5f, selected ? juce::Font::bold : juce::Font::plain));
+            g.drawFittedText (lane.name, rowText, juce::Justification::centredLeft, 1);
         }
     }
 
@@ -1614,11 +1658,30 @@ public:
         auto list = getTrackListBounds();
         for (int i = 0; i < static_cast<int> (state->lanes.size()); ++i)
         {
-            auto row = list.removeFromTop (34).reduced (0, 3);
+            auto row = list.removeFromTop (43).reduced (0, 4);
             if (row.contains (event.getPosition()))
             {
+                auto controls = row.reduced (10, 0).removeFromRight (82);
+                auto enabledArea = controls.removeFromLeft (25);
+                auto muteArea = controls.removeFromLeft (25);
+                auto soloArea = controls.removeFromLeft (25);
                 selectedIndex = i;
-                if (onTrackSelected)
+                if (enabledArea.contains (event.getPosition()))
+                {
+                    if (onEnabledToggled)
+                        onEnabledToggled (i);
+                }
+                else if (muteArea.contains (event.getPosition()))
+                {
+                    if (onMuteToggled)
+                        onMuteToggled (i);
+                }
+                else if (soloArea.contains (event.getPosition()))
+                {
+                    if (onSoloToggled)
+                        onSoloToggled (i);
+                }
+                else if (onTrackSelected)
                     onTrackSelected (i);
                 repaint();
                 return;
@@ -1630,6 +1693,18 @@ private:
     juce::Colour getTrackColour (int index) const
     {
         return paletteColour (index);
+    }
+
+    void drawToggle (juce::Graphics& g, juce::Rectangle<int> area, const juce::String& text, bool active, juce::Colour colour) const
+    {
+        auto pill = area.reduced (2, 9).toFloat();
+        g.setColour (active ? colour.withAlpha (0.92f) : juce::Colour (0xff111318));
+        g.fillRoundedRectangle (pill, 3.0f);
+        g.setColour (active ? juce::Colour (0xff111318).withAlpha (0.78f) : juce::Colour (0xff4b5560));
+        g.drawRoundedRectangle (pill, 3.0f, active ? 0.8f : 1.0f);
+        g.setColour (active ? juce::Colour (0xff101318) : mutedInk().withAlpha (0.72f));
+        g.setFont (juce::FontOptions (9.5f, juce::Font::bold));
+        g.drawText (text, area, juce::Justification::centred);
     }
 
     juce::Rectangle<int> getTrackListBounds() const
@@ -1719,12 +1794,23 @@ public:
         addAndMakeVisible (rulesTracksDivider);
         addAndMakeVisible (tracksCodeDivider);
         addAndMakeVisible (stateTabs);
+        addAndMakeVisible (breadcrumbLabel);
+        addAndMakeVisible (stateSummaryLabel);
+        addAndMakeVisible (nestedTimingLabel);
+        addAndMakeVisible (nestedModeBox);
+        addAndMakeVisible (nestedDivisionLabel);
+        addAndMakeVisible (nestedDivisionMinus);
+        addAndMakeVisible (nestedDivisionEditor);
+        addAndMakeVisible (nestedDivisionPlus);
         addAndMakeVisible (trackPaneTitle);
+        addAndMakeVisible (trackNameEditor);
         addAndMakeVisible (trackList);
         addAndMakeVisible (codePaneTitle);
         addAndMakeVisible (scriptEditor);
         addAndMakeVisible (addLaneButton);
         addAndMakeVisible (removeLaneButton);
+        addAndMakeVisible (moveLaneUpButton);
+        addAndMakeVisible (moveLaneDownButton);
         addAndMakeVisible (addChildMachineButton);
         addAndMakeVisible (enterChildMachineButton);
         addAndMakeVisible (exitChildMachineButton);
@@ -1735,6 +1821,52 @@ public:
         title.setFont (juce::FontOptions (24.0f, juce::Font::bold));
         title.setColour (juce::Label::textColourId, ink());
 
+        breadcrumbLabel.setFont (juce::FontOptions (12.0f));
+        breadcrumbLabel.setColour (juce::Label::textColourId, mutedInk());
+        breadcrumbLabel.setJustificationType (juce::Justification::centredLeft);
+
+        stateSummaryLabel.setFont (juce::FontOptions (13.0f, juce::Font::bold));
+        stateSummaryLabel.setColour (juce::Label::textColourId, ink());
+        stateSummaryLabel.setJustificationType (juce::Justification::centredLeft);
+
+        nestedTimingLabel.setText ("Nested timing", juce::dontSendNotification);
+        nestedTimingLabel.setFont (juce::FontOptions (12.5f, juce::Font::bold));
+        nestedTimingLabel.setColour (juce::Label::textColourId, mutedInk());
+
+        nestedModeBox.addItem (nestedTimingModeName (NestedTimingMode::followParent), 1);
+        nestedModeBox.addItem (nestedTimingModeName (NestedTimingMode::freeRun), 2);
+        nestedModeBox.addItem (nestedTimingModeName (NestedTimingMode::oneShot), 3);
+        nestedModeBox.addItem (nestedTimingModeName (NestedTimingMode::latch), 4);
+        nestedModeBox.setColour (juce::ComboBox::backgroundColourId, juce::Colour (0xff252a31));
+        nestedModeBox.setColour (juce::ComboBox::textColourId, ink());
+        nestedModeBox.setColour (juce::ComboBox::outlineColourId, juce::Colour (0xff59636e));
+        nestedModeBox.onChange = [this]
+        {
+            if (auto* child = currentInspectorMachine().childMachine (currentInspectorMachine().selectedState))
+            {
+                child->timingMode = static_cast<NestedTimingMode> (juce::jlimit (0, 3, nestedModeBox.getSelectedItemIndex()));
+                child->oneShotComplete = false;
+                markMachineDirty();
+                refreshControls();
+            }
+        };
+
+        nestedDivisionLabel.setText ("Division", juce::dontSendNotification);
+        nestedDivisionLabel.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+        nestedDivisionLabel.setColour (juce::Label::textColourId, mutedInk());
+        nestedDivisionMinus.setButtonText ("-");
+        nestedDivisionPlus.setButtonText ("+");
+        nestedDivisionEditor.setInputRestrictions (2, "0123456789");
+        nestedDivisionEditor.setJustification (juce::Justification::centred);
+        nestedDivisionEditor.setMultiLine (false);
+        nestedDivisionEditor.setColour (juce::TextEditor::backgroundColourId, juce::Colour (0xff111318));
+        nestedDivisionEditor.setColour (juce::TextEditor::textColourId, ink());
+        nestedDivisionEditor.setColour (juce::TextEditor::outlineColourId, juce::Colour (0xff34414a));
+        nestedDivisionEditor.onReturnKey = [this] { commitNestedDivisionEditor(); };
+        nestedDivisionEditor.onFocusLost = [this] { commitNestedDivisionEditor(); };
+        nestedDivisionMinus.onClick = [this] { adjustNestedDivision (-1); };
+        nestedDivisionPlus.onClick = [this] { adjustNestedDivision (1); };
+
         codePaneTitle.setText ("SC Code", juce::dontSendNotification);
         codePaneTitle.setFont (juce::FontOptions (13.5f, juce::Font::bold));
         codePaneTitle.setColour (juce::Label::textColourId, ink());
@@ -1744,6 +1876,18 @@ public:
         trackPaneTitle.setFont (juce::FontOptions (13.5f, juce::Font::bold));
         trackPaneTitle.setColour (juce::Label::textColourId, ink());
         trackPaneTitle.setJustificationType (juce::Justification::centredLeft);
+
+        trackNameEditor.setMultiLine (false);
+        trackNameEditor.setFont (juce::FontOptions (13.0f));
+        trackNameEditor.setColour (juce::TextEditor::backgroundColourId, juce::Colour (0xff111318));
+        trackNameEditor.setColour (juce::TextEditor::textColourId, ink());
+        trackNameEditor.setColour (juce::TextEditor::outlineColourId, juce::Colour (0xff34414a));
+        trackNameEditor.onTextChange = [this]
+        {
+            currentInspectorMachine().selectedLaneRef().name = trackNameEditor.getText().trim();
+            markMachineDirty();
+            trackList.repaint();
+        };
 
         statusLabel.setText ("Audio offline", juce::dontSendNotification);
         statusLabel.setFont (juce::FontOptions (13.0f));
@@ -1902,12 +2046,46 @@ public:
         {
             currentMachine().selectedState = newIndex;
             currentMachine().selectedLane = 0;
+            inspectedMachine = &currentMachine();
             refreshControls();
         };
 
         trackList.onTrackSelected = [this] (int newIndex)
         {
             currentInspectorMachine().selectedLane = newIndex;
+            refreshControls();
+        };
+
+        trackList.onEnabledToggled = [this] (int newIndex)
+        {
+            auto& inspected = currentInspectorMachine();
+            inspected.selectedLane = newIndex;
+            auto& lane = inspected.selectedLaneRef();
+            lane.enabled = ! lane.enabled;
+            if (! lane.enabled)
+                host.stop (lane);
+            markMachineDirty();
+            refreshControls();
+        };
+
+        trackList.onMuteToggled = [this] (int newIndex)
+        {
+            auto& inspected = currentInspectorMachine();
+            inspected.selectedLane = newIndex;
+            auto& lane = inspected.selectedLaneRef();
+            lane.muted = ! lane.muted;
+            if (lane.muted)
+                host.stop (lane);
+            markMachineDirty();
+            refreshControls();
+        };
+
+        trackList.onSoloToggled = [this] (int newIndex)
+        {
+            auto& inspected = currentInspectorMachine();
+            inspected.selectedLane = newIndex;
+            inspected.selectedLaneRef().solo = ! inspected.selectedLaneRef().solo;
+            markMachineDirty();
             refreshControls();
         };
 
@@ -1926,6 +2104,8 @@ public:
 
         addLaneButton.setButtonText ("+ Lane");
         removeLaneButton.setButtonText ("- Lane");
+        moveLaneUpButton.setButtonText ("Up");
+        moveLaneDownButton.setButtonText ("Down");
         addChildMachineButton.setButtonText ("+ FSM");
         enterChildMachineButton.setButtonText ("Enter");
         exitChildMachineButton.setButtonText ("Back");
@@ -1943,6 +2123,20 @@ public:
         {
             host.stop (currentInspectorMachine().selectedLaneRef());
             currentInspectorMachine().removeSelectedLane();
+            markMachineDirty();
+            refreshControls();
+        };
+
+        moveLaneUpButton.onClick = [this]
+        {
+            currentInspectorMachine().moveSelectedLane (-1);
+            markMachineDirty();
+            refreshControls();
+        };
+
+        moveLaneDownButton.onClick = [this]
+        {
+            currentInspectorMachine().moveSelectedLane (1);
             markMachineDirty();
             refreshControls();
         };
@@ -1975,7 +2169,13 @@ public:
 
         playButton.onClick = [this]
         {
-            host.play (currentInspectorMachine().selectedLaneRef(), getSclangPathOverride());
+            auto& inspected = currentInspectorMachine();
+            auto& state = inspected.state (inspected.selectedState);
+            auto& lane = inspected.selectedLaneRef();
+            if (shouldPlayLane (state, lane))
+                host.play (lane, getSclangPathOverride());
+            else
+                host.stop (lane);
             refreshControls();
         };
 
@@ -2117,10 +2317,26 @@ public:
         rulesTracksDivider.setBounds (dividerA);
 
         auto trackPaneInner = tracksPane.reduced (10, 8);
-        trackPaneTitle.setBounds (trackPaneInner.removeFromTop (28).reduced (2, 0));
+        breadcrumbLabel.setBounds (trackPaneInner.removeFromTop (22).reduced (2, 0));
+        stateSummaryLabel.setBounds (trackPaneInner.removeFromTop (28).reduced (2, 0));
+        auto timingRow = trackPaneInner.removeFromTop (34);
+        nestedTimingLabel.setBounds (timingRow.removeFromLeft (96).reduced (2, 4));
+        nestedModeBox.setBounds (timingRow.reduced (2, 4));
+        auto divisionRow = trackPaneInner.removeFromTop (32);
+        nestedDivisionLabel.setBounds (divisionRow.removeFromLeft (76).reduced (2, 4));
+        nestedDivisionMinus.setBounds (divisionRow.removeFromLeft (28).reduced (2, 4));
+        nestedDivisionEditor.setBounds (divisionRow.removeFromLeft (42).reduced (2, 4));
+        nestedDivisionPlus.setBounds (divisionRow.removeFromLeft (28).reduced (2, 4));
+        trackPaneInner.removeFromTop (8);
+        auto trackNameRow = trackPaneInner.removeFromTop (34);
+        trackNameEditor.setBounds (trackNameRow.reduced (0, 2));
         auto trackHeader = trackPaneInner.removeFromTop (38);
-        addLaneButton.setBounds (trackHeader.removeFromLeft (92).reduced (0, 4));
-        removeLaneButton.setBounds (trackHeader.removeFromLeft (92).reduced (6, 4));
+        trackPaneTitle.setBounds (trackHeader.removeFromLeft (68).reduced (2, 4));
+        moveLaneUpButton.setBounds (trackHeader.removeFromRight (54).reduced (3, 4));
+        moveLaneDownButton.setBounds (trackHeader.removeFromRight (64).reduced (3, 4));
+        auto laneButtonRow = trackPaneInner.removeFromTop (38);
+        addLaneButton.setBounds (laneButtonRow.removeFromLeft (92).reduced (0, 4));
+        removeLaneButton.setBounds (laneButtonRow.removeFromLeft (92).reduced (6, 4));
         trackList.setBounds (trackPaneInner.reduced (0, 4));
 
         auto codePaneInner = codePane.reduced (8, 0);
@@ -2152,9 +2368,75 @@ private:
         return inspectedMachine != nullptr ? *inspectedMachine : *activeMachine;
     }
 
+    MachineModel* selectedNestedMachine() const
+    {
+        return currentInspectorMachine().childMachine (currentInspectorMachine().selectedState);
+    }
+
+    juce::String makeBreadcrumb() const
+    {
+        juce::StringArray parts;
+        parts.add ("Top FSM");
+        addBreadcrumbParts (&machine, inspectedMachine, parts);
+        parts.add (currentInspectorMachine().state (currentInspectorMachine().selectedState).name);
+        return parts.joinIntoString (" / ");
+    }
+
+    bool addBreadcrumbParts (const MachineModel* model, const MachineModel* target, juce::StringArray& parts) const
+    {
+        if (model == target)
+            return true;
+
+        for (int i = 0; i < model->getStateCount(); ++i)
+        {
+            if (auto* child = model->childMachine (i))
+            {
+                parts.add (model->state (i).name + " FSM");
+                if (addBreadcrumbParts (child, target, parts))
+                    return true;
+                parts.remove (parts.size() - 1);
+            }
+        }
+
+        return false;
+    }
+
+    juce::String makeStateSummary() const
+    {
+        const auto& inspected = currentInspectorMachine();
+        const auto& s = inspected.state (inspected.selectedState);
+        const auto laneCount = static_cast<int> (s.lanes.size());
+        auto activeText = (&inspected == activeMachine) ? "active" : "inspecting";
+        const auto nestedText = inspected.hasChildMachine (inspected.selectedState) ? "nested FSM" : "no nested FSM";
+        return s.name + "  ·  " + juce::String (laneCount) + (laneCount == 1 ? " track" : " tracks")
+             + "  ·  " + activeText + "  ·  " + nestedText;
+    }
+
     juce::String getSclangPathOverride() const
     {
         return {};
+    }
+
+    void commitNestedDivisionEditor()
+    {
+        if (auto* child = selectedNestedMachine())
+        {
+            child->parentDivision = juce::jlimit (1, 16, nestedDivisionEditor.getText().getIntValue());
+            child->parentTickCounter = 0;
+            markMachineDirty();
+            refreshControls();
+        }
+    }
+
+    void adjustNestedDivision (int delta)
+    {
+        if (auto* child = selectedNestedMachine())
+        {
+            child->parentDivision = juce::jlimit (1, 16, child->parentDivision + delta);
+            child->parentTickCounter = 0;
+            markMachineDirty();
+            refreshControls();
+        }
     }
 
     void setActiveMachine (MachineModel& newMachine)
@@ -2394,8 +2676,10 @@ private:
 
     void playState (int stateIndex)
     {
-        for (auto& lane : currentMachine().state (stateIndex).lanes)
-            host.play (lane, getSclangPathOverride());
+        auto& s = currentMachine().state (stateIndex);
+        for (auto& lane : s.lanes)
+            if (shouldPlayLane (s, lane))
+                host.play (lane, getSclangPathOverride());
     }
 
     void prepareAllLanes()
@@ -2449,16 +2733,16 @@ private:
     {
         model.entryState = juce::jlimit (0, model.getStateCount() - 1, stateIndex);
         model.stepsSinceEntry = 0;
+        model.parentTickCounter = 0;
+        model.oneShotComplete = false;
+        model.latchedActive = true;
         enterState (model, model.entryState);
     }
 
     bool advanceMachineTree (MachineModel& model)
     {
-        if (auto* child = model.childMachine (model.selectedState))
-        {
-            if (! advanceMachineTree (*child))
-                return false;
-        }
+        if (! advanceSelectedChildMachine (model, false))
+            return false;
 
         const auto nextState = chooseNextState (model);
         enterState (model, nextState);
@@ -2475,21 +2759,72 @@ private:
                 host.stop (lane);
 
             if (auto* child = model.childMachine (model.selectedState))
-                stopMachineRecursive (*child);
+                if (child->timingMode != NestedTimingMode::latch)
+                    stopMachineRecursive (*child);
         }
 
         model.selectedState = stateIndex;
         model.selectedLane = 0;
 
-        for (auto& lane : model.state (stateIndex).lanes)
-            host.play (lane, getSclangPathOverride());
+        auto& state = model.state (stateIndex);
+        for (auto& lane : state.lanes)
+            if (shouldPlayLane (state, lane))
+                host.play (lane, getSclangPathOverride());
 
         if (auto* child = model.childMachine (stateIndex))
-            startMachine (*child, child->selectedState);
+            startChildMachineForParentState (*child);
+    }
+
+    void startChildMachineForParentState (MachineModel& child)
+    {
+        child.parentTickCounter = 0;
+        child.oneShotComplete = false;
+
+        if (child.timingMode != NestedTimingMode::latch || ! child.latchedActive)
+            startMachine (child, child.selectedState);
+        else if (child.timingMode == NestedTimingMode::latch)
+            child.latchedActive = true;
+    }
+
+    bool advanceSelectedChildMachine (MachineModel& parent, bool parentIsHolding)
+    {
+        auto* child = parent.childMachine (parent.selectedState);
+        if (child == nullptr)
+            return true;
+
+        ++child->parentTickCounter;
+        if (child->parentTickCounter < child->parentDivision)
+            return true;
+
+        child->parentTickCounter = 0;
+
+        switch (child->timingMode)
+        {
+            case NestedTimingMode::followParent:
+                advanceMachineTree (*child);
+                return true;
+
+            case NestedTimingMode::freeRun:
+                advanceMachineTree (*child);
+                return true;
+
+            case NestedTimingMode::oneShot:
+                if (! child->oneShotComplete)
+                    child->oneShotComplete = advanceMachineTree (*child);
+                return child->oneShotComplete || parentIsHolding;
+
+            case NestedTimingMode::latch:
+                advanceMachineTree (*child);
+                return true;
+        }
+
+        return true;
     }
 
     void stopMachineRecursive (MachineModel& model)
     {
+        model.latchedActive = false;
+        model.oneShotComplete = false;
         for (auto& state : model.states)
         {
             for (auto& lane : state.lanes)
@@ -2500,6 +2835,19 @@ private:
         }
     }
 
+    bool shouldPlayLane (const State& state, const Lane& lane) const
+    {
+        if (! lane.enabled || lane.muted)
+            return false;
+
+        const auto anySolo = std::any_of (state.lanes.begin(), state.lanes.end(), [] (const Lane& l)
+        {
+            return l.enabled && l.solo;
+        });
+
+        return ! anySolo || lane.solo;
+    }
+
     void refreshControls()
     {
         refreshStateTabs();
@@ -2507,8 +2855,31 @@ private:
         rules.setMachine (currentInspectorMachine());
 
         scriptEditor.setText (currentInspectorMachine().selectedLaneRef().script, juce::dontSendNotification);
+        trackNameEditor.setText (currentInspectorMachine().selectedLaneRef().name, false);
+        breadcrumbLabel.setText (makeBreadcrumb(), juce::dontSendNotification);
+        stateSummaryLabel.setText (makeStateSummary(), juce::dontSendNotification);
+        if (auto* child = selectedNestedMachine())
+        {
+            nestedModeBox.setEnabled (true);
+            nestedDivisionMinus.setEnabled (true);
+            nestedDivisionEditor.setEnabled (true);
+            nestedDivisionPlus.setEnabled (true);
+            nestedModeBox.setSelectedItemIndex (static_cast<int> (child->timingMode), juce::dontSendNotification);
+            nestedDivisionEditor.setText (juce::String (child->parentDivision), false);
+        }
+        else
+        {
+            nestedModeBox.setEnabled (false);
+            nestedDivisionMinus.setEnabled (false);
+            nestedDivisionEditor.setEnabled (false);
+            nestedDivisionPlus.setEnabled (false);
+            nestedModeBox.setSelectedItemIndex (0, juce::dontSendNotification);
+            nestedDivisionEditor.setText ("-", false);
+        }
         topStateCountEditor.setText (juce::String (machine.getStateCount()), false);
         playButton.setColour (juce::TextButton::buttonColourId, currentInspectorMachine().selectedLaneRef().playing ? accentA().darker (0.2f) : accentB().darker (0.35f));
+        moveLaneUpButton.setEnabled (currentInspectorMachine().selectedLane > 0);
+        moveLaneDownButton.setEnabled (currentInspectorMachine().selectedLane < currentInspectorMachine().getLaneCount (currentInspectorMachine().selectedState) - 1);
         const auto hasChild = currentMachine().hasChildMachine (currentMachine().selectedState);
         addChildMachineButton.setEnabled (! hasChild);
         enterChildMachineButton.setEnabled (hasChild);
@@ -2558,12 +2929,23 @@ private:
     juce::TextButton stopAllButton;
     juce::Slider rateSlider;
     PillBar stateTabs;
+    juce::Label breadcrumbLabel;
+    juce::Label stateSummaryLabel;
+    juce::Label nestedTimingLabel;
+    juce::ComboBox nestedModeBox;
+    juce::Label nestedDivisionLabel;
+    juce::TextButton nestedDivisionMinus;
+    juce::TextEditor nestedDivisionEditor;
+    juce::TextButton nestedDivisionPlus;
     juce::Label trackPaneTitle;
+    juce::TextEditor trackNameEditor;
     TrackListComponent trackList;
     juce::Label codePaneTitle;
     juce::TextEditor scriptEditor;
     juce::TextButton addLaneButton;
     juce::TextButton removeLaneButton;
+    juce::TextButton moveLaneUpButton;
+    juce::TextButton moveLaneDownButton;
     juce::TextButton addChildMachineButton;
     juce::TextButton enterChildMachineButton;
     juce::TextButton exitChildMachineButton;
