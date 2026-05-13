@@ -890,6 +890,10 @@ private:
 
         const auto outerMargin = getOuterNodeExtent() + 20.0f;
         auto area = getLocalBounds().toFloat().reduced (outerMargin, outerMargin * 0.78f);
+        const auto maxLayoutWidth = area.getHeight() * 3.35f;
+        if (area.getWidth() > maxLayoutWidth)
+            area = area.withSizeKeepingCentre (maxLayoutWidth, area.getHeight());
+
         auto centre = area.getCentre();
         auto rx = area.getWidth() * 0.48f;
         auto ry = area.getHeight() * 0.44f;
@@ -1279,7 +1283,7 @@ public:
         addButton.setButtonText ("Add");
         updateButton.setButtonText ("Save");
         removeButton.setButtonText ("Delete");
-        ringButton.setButtonText ("Ring rules");
+        ringButton.setButtonText ("Rules");
 
         addButton.onClick = [this]
         {
@@ -1397,7 +1401,7 @@ public:
         addButton.setBounds (area.removeFromLeft (54).reduced (4));
         updateButton.setBounds (area.removeFromLeft (58).reduced (4));
         removeButton.setBounds (area.removeFromLeft (62).reduced (4));
-        ringButton.setBounds (area.removeFromLeft (82).reduced (4));
+        ringButton.setBounds (area.removeFromLeft (64).reduced (4));
     }
 
 private:
@@ -1563,10 +1567,6 @@ public:
         g.setColour (juce::Colour (0xff181b20));
         g.fillRoundedRectangle (bounds.toFloat(), 7.0f);
 
-        g.setColour (ink());
-        g.setFont (juce::FontOptions (13.5f, juce::Font::bold));
-        g.drawText ("Tracks", bounds.removeFromTop (28).reduced (10, 0), juce::Justification::centredLeft);
-
         if (state == nullptr)
             return;
 
@@ -1634,11 +1634,64 @@ private:
 
     juce::Rectangle<int> getTrackListBounds() const
     {
-        return getLocalBounds().withTrimmedTop (32).reduced (8, 4);
+        return getLocalBounds().reduced (8, 8);
     }
 
     State* state = nullptr;
     int selectedIndex = 0;
+};
+
+class PaneDivider final : public juce::Component
+{
+public:
+    enum class Orientation
+    {
+        vertical,
+        horizontal
+    };
+
+    std::function<void()> onDragStarted;
+    std::function<void (int)> onDragged;
+
+    explicit PaneDivider (Orientation orientationToUse = Orientation::vertical) : orientation (orientationToUse)
+    {
+        setMouseCursor (orientation == Orientation::vertical ? juce::MouseCursor::LeftRightResizeCursor
+                                                             : juce::MouseCursor::UpDownResizeCursor);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto bounds = getLocalBounds().toFloat();
+        g.setColour (juce::Colour (0xff0f1116).withAlpha (0.72f));
+        g.fillRoundedRectangle (orientation == Orientation::vertical ? bounds.reduced (2.0f, 0.0f)
+                                                                     : bounds.reduced (0.0f, 2.0f), 3.0f);
+        g.setColour (accentB().withAlpha (isMouseOverOrDragging() ? 0.62f : 0.18f));
+        g.fillRoundedRectangle (orientation == Orientation::vertical
+                                    ? bounds.withSizeKeepingCentre (1.5f, bounds.getHeight() - 20.0f)
+                                    : bounds.withSizeKeepingCentre (bounds.getWidth() - 28.0f, 1.5f), 1.0f);
+    }
+
+    void mouseDown (const juce::MouseEvent&) override
+    {
+        if (onDragStarted)
+            onDragStarted();
+        repaint();
+    }
+
+    void mouseDrag (const juce::MouseEvent& event) override
+    {
+        if (onDragged)
+            onDragged (orientation == Orientation::vertical ? event.getDistanceFromDragStartX()
+                                                            : event.getDistanceFromDragStartY());
+    }
+
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        repaint();
+    }
+
+private:
+    Orientation orientation = Orientation::vertical;
 };
 
 class MainComponent final : public juce::Component
@@ -1662,8 +1715,13 @@ public:
         addAndMakeVisible (rateSlider);
         addAndMakeVisible (graph);
         addAndMakeVisible (rules);
+        addAndMakeVisible (graphBottomDivider);
+        addAndMakeVisible (rulesTracksDivider);
+        addAndMakeVisible (tracksCodeDivider);
         addAndMakeVisible (stateTabs);
+        addAndMakeVisible (trackPaneTitle);
         addAndMakeVisible (trackList);
+        addAndMakeVisible (codePaneTitle);
         addAndMakeVisible (scriptEditor);
         addAndMakeVisible (addLaneButton);
         addAndMakeVisible (removeLaneButton);
@@ -1674,8 +1732,18 @@ public:
         addAndMakeVisible (stopButton);
 
         title.setText ("Markov FSM", juce::dontSendNotification);
-        title.setFont (juce::FontOptions (25.0f, juce::Font::bold));
+        title.setFont (juce::FontOptions (24.0f, juce::Font::bold));
         title.setColour (juce::Label::textColourId, ink());
+
+        codePaneTitle.setText ("SC Code", juce::dontSendNotification);
+        codePaneTitle.setFont (juce::FontOptions (13.5f, juce::Font::bold));
+        codePaneTitle.setColour (juce::Label::textColourId, ink());
+        codePaneTitle.setJustificationType (juce::Justification::centredLeft);
+
+        trackPaneTitle.setText ("Tracks", juce::dontSendNotification);
+        trackPaneTitle.setFont (juce::FontOptions (13.5f, juce::Font::bold));
+        trackPaneTitle.setColour (juce::Label::textColourId, ink());
+        trackPaneTitle.setJustificationType (juce::Justification::centredLeft);
 
         statusLabel.setText ("Audio offline", juce::dontSendNotification);
         statusLabel.setFont (juce::FontOptions (13.0f));
@@ -1685,6 +1753,39 @@ public:
         statusLabel.onClick = [this]
         {
             startPrepareJob (false);
+        };
+
+        rulesTracksDivider.onDragged = [this] (int delta)
+        {
+            rulesPaneWidth = juce::jlimit (300, 860, dividerDragStartRulesWidth + delta);
+            resized();
+        };
+        rulesTracksDivider.onDragStarted = [this]
+        {
+            rulesPaneUserSized = true;
+            dividerDragStartRulesWidth = rulesPaneWidth;
+        };
+
+        tracksCodeDivider.onDragged = [this] (int delta)
+        {
+            tracksPaneWidth = juce::jlimit (260, 460, dividerDragStartTracksWidth - delta);
+            resized();
+        };
+        tracksCodeDivider.onDragStarted = [this]
+        {
+            tracksPaneUserSized = true;
+            dividerDragStartTracksWidth = tracksPaneWidth;
+        };
+
+        graphBottomDivider.onDragged = [this] (int delta)
+        {
+            bottomPaneHeight = dividerDragStartBottomHeight - delta;
+            resized();
+        };
+        graphBottomDivider.onDragStarted = [this]
+        {
+            bottomPaneUserSized = true;
+            dividerDragStartBottomHeight = bottomPaneHeight;
         };
 
         logButton.setButtonText ("Log");
@@ -1813,9 +1914,9 @@ public:
         scriptEditor.setMultiLine (true);
         scriptEditor.setReturnKeyStartsNewLine (true);
         scriptEditor.setFont (juce::FontOptions (15.0f, juce::Font::plain));
-        scriptEditor.setColour (juce::TextEditor::backgroundColourId, juce::Colour (0xff111318));
+        scriptEditor.setColour (juce::TextEditor::backgroundColourId, juce::Colour (0xff0f1116));
         scriptEditor.setColour (juce::TextEditor::textColourId, ink());
-        scriptEditor.setColour (juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
+        scriptEditor.setColour (juce::TextEditor::outlineColourId, juce::Colour (0xff242a32));
         scriptEditor.onTextChange = [this]
         {
             currentInspectorMachine().selectedLaneRef().script = scriptEditor.getText();
@@ -1978,24 +2079,62 @@ public:
         runButton.setBounds (header.removeFromRight (88).reduced (4, 8));
         statusLabel.setBounds (header.reduced (8, 8));
 
-        auto lower = area.removeFromBottom (230);
-        rules.setBounds (lower.removeFromLeft (520).reduced (0, 8));
+        const auto horizontalDividerHeight = 8;
+        const auto minGraphHeight = 230;
+        const auto minBottomHeight = 170;
+        const auto maxBottomHeight = juce::jmax (minBottomHeight, area.getHeight() - 36 - minGraphHeight - horizontalDividerHeight);
+        if (! bottomPaneUserSized)
+            bottomPaneHeight = juce::jlimit (240, 330, juce::roundToInt (static_cast<float> (area.getHeight()) * 0.30f));
+        bottomPaneHeight = juce::jlimit (minBottomHeight, maxBottomHeight, bottomPaneHeight);
 
-        auto laneArea = lower.reduced (14, 8);
-        auto laneHeader = laneArea.removeFromTop (34);
-        addLaneButton.setBounds (laneHeader.removeFromLeft (76).reduced (3));
-        removeLaneButton.setBounds (laneHeader.removeFromLeft (76).reduced (3));
-        addChildMachineButton.setBounds (laneHeader.removeFromLeft (70).reduced (3));
-        enterChildMachineButton.setBounds (laneHeader.removeFromLeft (66).reduced (3));
-        exitChildMachineButton.setBounds (laneHeader.removeFromLeft (62).reduced (3));
-        playButton.setBounds (laneHeader.removeFromLeft (72).reduced (3));
-        stopButton.setBounds (laneHeader.removeFromLeft (72).reduced (3));
-        auto laneBody = laneArea.reduced (0, 6);
-        trackList.setBounds (laneBody.removeFromLeft (176));
-        scriptEditor.setBounds (laneBody.reduced (10, 0));
+        const auto dividerWidth = 8;
+        const auto minWorkspace = 760;
+        const auto minTracks = 260;
+        const auto maxTracks = juce::jmax (minTracks, area.getWidth() - minWorkspace - dividerWidth);
+        if (! tracksPaneUserSized)
+            tracksPaneWidth = juce::jlimit (300, 360, juce::roundToInt (static_cast<float> (area.getWidth()) * 0.17f));
+        tracksPaneWidth = juce::jlimit (minTracks, juce::jmin (460, maxTracks), tracksPaneWidth);
+
+        auto tracksPane = area.removeFromRight (tracksPaneWidth);
+        tracksCodeDivider.setBounds (area.removeFromRight (dividerWidth).reduced (0, 8));
+        auto workspace = area;
+
+        auto lower = workspace.removeFromBottom (bottomPaneHeight).reduced (0, 8);
+        graphBottomDivider.setBounds (workspace.removeFromBottom (horizontalDividerHeight).reduced (0, 1));
+        const auto minRules = 300;
+        const auto minCode = 440;
+        const auto maxRules = juce::jmax (minRules, lower.getWidth() - minCode - dividerWidth);
+        if (! rulesPaneUserSized)
+            rulesPaneWidth = juce::roundToInt (static_cast<float> (lower.getWidth()) * 0.43f);
+        rulesPaneWidth = juce::jlimit (minRules, maxRules, rulesPaneWidth);
+
+        auto bottom = lower;
+        auto rulesPane = bottom.removeFromLeft (rulesPaneWidth);
+        auto dividerA = bottom.removeFromLeft (dividerWidth);
+        auto codePane = bottom;
+
+        rules.setBounds (rulesPane);
+        rulesTracksDivider.setBounds (dividerA);
+
+        auto trackPaneInner = tracksPane.reduced (10, 8);
+        trackPaneTitle.setBounds (trackPaneInner.removeFromTop (28).reduced (2, 0));
+        auto trackHeader = trackPaneInner.removeFromTop (38);
+        addLaneButton.setBounds (trackHeader.removeFromLeft (92).reduced (0, 4));
+        removeLaneButton.setBounds (trackHeader.removeFromLeft (92).reduced (6, 4));
+        trackList.setBounds (trackPaneInner.reduced (0, 4));
+
+        auto codePaneInner = codePane.reduced (8, 0);
+        auto codeHeader = codePaneInner.removeFromTop (34);
+        codePaneTitle.setBounds (codeHeader.removeFromLeft (74).reduced (3));
+        addChildMachineButton.setBounds (codeHeader.removeFromLeft (64).reduced (3));
+        enterChildMachineButton.setBounds (codeHeader.removeFromLeft (58).reduced (3));
+        exitChildMachineButton.setBounds (codeHeader.removeFromLeft (54).reduced (3));
+        playButton.setBounds (codeHeader.removeFromLeft (64).reduced (3));
+        stopButton.setBounds (codeHeader.removeFromLeft (64).reduced (3));
+        scriptEditor.setBounds (codePaneInner.reduced (0, 6));
 
         stateTabs.setBounds (area.removeFromTop (36));
-        auto graphArea = area.reduced (0, 10);
+        auto graphArea = workspace.reduced (0, 10);
         if (logVisible)
             logView.setBounds (graphArea.removeFromBottom (142).reduced (0, 8));
 
@@ -2402,6 +2541,9 @@ private:
     SuperColliderHost host;
     GraphComponent graph;
     RuleListComponent rules;
+    PaneDivider graphBottomDivider { PaneDivider::Orientation::horizontal };
+    PaneDivider rulesTracksDivider;
+    PaneDivider tracksCodeDivider;
 
     juce::Label title;
     ClickableLabel statusLabel;
@@ -2416,7 +2558,9 @@ private:
     juce::TextButton stopAllButton;
     juce::Slider rateSlider;
     PillBar stateTabs;
+    juce::Label trackPaneTitle;
     TrackListComponent trackList;
+    juce::Label codePaneTitle;
     juce::TextEditor scriptEditor;
     juce::TextButton addLaneButton;
     juce::TextButton removeLaneButton;
@@ -2430,6 +2574,15 @@ private:
     bool logVisible = false;
     bool fsmRunning = false;
     bool machinePrepared = false;
+    int rulesPaneWidth = 500;
+    int tracksPaneWidth = 210;
+    int bottomPaneHeight = 250;
+    int dividerDragStartRulesWidth = 500;
+    int dividerDragStartTracksWidth = 210;
+    int dividerDragStartBottomHeight = 250;
+    bool rulesPaneUserSized = false;
+    bool tracksPaneUserSized = false;
+    bool bottomPaneUserSized = false;
     std::atomic<bool> audioJobRunning { false };
     std::atomic<bool> transportShouldRun { false };
     std::mutex transportMutex;
@@ -2470,8 +2623,11 @@ private:
         {
             setUsingNativeTitleBar (true);
             setContentOwned (new MainComponent(), true);
-            centreWithSize (getWidth(), getHeight());
             setResizable (true, true);
+            if (auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
+                setBounds (display->userArea);
+            else
+                centreWithSize (getWidth(), getHeight());
             setVisible (true);
         }
 
