@@ -1,6 +1,8 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 #include <juce_osc/juce_osc.h>
 
+#include "FsmModel.h"
+
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -8,7 +10,6 @@
 
 namespace
 {
-constexpr int maxStateCount = 12;
 constexpr int superColliderLanguagePort = 57141;
 constexpr double musicalReleaseSeconds = 1.45;
 
@@ -18,27 +19,6 @@ enum class LatencyProfile
     low,
     ultra
 };
-
-enum class NestedTimingMode
-{
-    followParent,
-    freeRun,
-    oneShot,
-    latch
-};
-
-juce::String nestedTimingModeName (NestedTimingMode mode)
-{
-    switch (mode)
-    {
-        case NestedTimingMode::followParent: return "Follow";
-        case NestedTimingMode::freeRun: return "Free-run";
-        case NestedTimingMode::oneShot: return "One-shot";
-        case NestedTimingMode::latch: return "Latch";
-    }
-
-    return "Follow";
-}
 
 constexpr auto activeLatencyProfile = LatencyProfile::low;
 constexpr bool enableHiddenCrossfades = true;
@@ -80,178 +60,6 @@ juce::Colour paletteColour (int index)
     };
 
     return juce::Colour (colours[static_cast<size_t> (index) % std::size (colours)]);
-}
-
-juce::String defaultScriptFor (int stateIndex, int laneIndex)
-{
-    auto freq = 160 + (stateIndex * 53) + (laneIndex * 37);
-    return "(\n"
-           "{ |gate=1, fade=0.12, vol=1|\n"
-           "    var pulse = Impulse.kr(" + juce::String (4 + laneIndex) + ", 0.88);\n"
-           "    var env = Decay2.kr(pulse, 0.01, 0.22);\n"
-           "    var active = EnvGen.kr(Env.asr(fade, 1, fade), gate);\n"
-           "    var tone = SinOsc.ar(" + juce::String (freq) + " * [1, 1.005]);\n"
-           "    var body = LFTri.ar(" + juce::String (freq / 2) + " * [1.002, 1]);\n"
-           "    (tone + (body * 0.35)) * env * active * vol * 0.055;\n"
-           "}.play;\n"
-           ")\n";
-}
-
-juce::String demoScript (const juce::String& role, int stateIndex, int laneIndex)
-{
-    const auto melodicRoot = 50 + (stateIndex * 3) + (laneIndex * 5);
-    const auto phraseRoot = 57 + (stateIndex * 2) + (laneIndex * 4);
-    const auto bassRoot = 36 + (stateIndex % 4) * 2 + laneIndex * 3;
-    const auto textureHz = 150 + stateIndex * 34 + laneIndex * 21;
-
-    if (role == "pulse")
-        return "(\n"
-               "{ |gate=1, fade=0.12, vol=1|\n"
-               "    var active = EnvGen.kr(Env.asr(fade, 1, fade), gate);\n"
-               "    var trig = Impulse.kr(2, 0.88);\n"
-               "    var env = Decay2.kr(trig, 0.002, 0.18);\n"
-               "    var sweep = EnvGen.kr(Env.perc(0.001, 0.06, 42, -5), trig);\n"
-               "    var kick = SinOsc.ar(42 + sweep) * env * 0.62;\n"
-               "    var click = BPF.ar(WhiteNoise.ar(0.08), 1700, 0.42) * Decay2.kr(trig, 0.001, 0.014);\n"
-               "    LPF.ar((kick + click) * active * vol * 0.045, 3200) ! 2;\n"
-               "}.play;\n"
-               ")\n";
-
-    if (role == "shimmer")
-        return "(\n"
-               "{ |gate=1, fade=0.12, vol=1|\n"
-               "    var active = EnvGen.kr(Env.asr(fade, 1, fade), gate);\n"
-               "    var trig = Dust.kr(3.2);\n"
-               "    var notes = Demand.kr(trig, 0, Dseq([" + juce::String (melodicRoot + 12) + ", "
-                    + juce::String (melodicRoot + 19) + ", " + juce::String (melodicRoot + 24) + ", "
-                    + juce::String (melodicRoot + 31) + "].midicps, inf));\n"
-               "    var env = Decay2.kr(trig, 0.01, 0.42);\n"
-               "    var sig = VarSaw.ar(notes * [0.5, 0.5015], 0, 0.32) * env;\n"
-               "    sig = CombC.ar(sig, 0.32, 0.21, 1.2) + (sig * 0.6);\n"
-               "    LPF.ar(HPF.ar(sig, 180), 2800) * active * vol * 0.064;\n"
-               "}.play;\n"
-               ")\n";
-
-    if (role == "arp")
-    {
-        const auto arpRoot = 48 + (stateIndex * 3) + (laneIndex * 5);
-        return "(\n"
-               "{ |gate=1, fade=0.12, vol=1|\n"
-               "    var active = EnvGen.kr(Env.asr(fade, 1, fade), gate);\n"
-               "    var trig = Impulse.kr(1.55, 0.88);\n"
-               "    var seq = Dseq([" + juce::String (arpRoot) + ", " + juce::String (arpRoot + 7) + ", "
-                    + juce::String (arpRoot + 12) + ", " + juce::String (arpRoot + 19) + ", "
-                    + juce::String (arpRoot + 24) + ", " + juce::String (arpRoot + 31) + ", "
-                    + juce::String (arpRoot + 24) + ", " + juce::String (arpRoot + 19) + ", "
-                    + juce::String (arpRoot + 12) + ", " + juce::String (arpRoot + 7) + "].midicps, inf);\n"
-               "    var freq = Demand.kr(trig, 0, seq);\n"
-               "    var env = Decay2.kr(trig, 0.018, 0.72);\n"
-               "    var sweep = Decay2.kr(trig, 0.035, 0.62).range(520, 2600);\n"
-               "    var sub = VarSaw.ar(freq * 0.5, 0, 0.46, 0.30);\n"
-               "    var main = VarSaw.ar(freq, 0, 0.38, 0.38);\n"
-               "    var detune = VarSaw.ar(freq * [0.997, 1.004], 0, 0.42, 0.24).sum;\n"
-               "    var octave = Pulse.ar(freq * 2.0, 0.42, 0.16);\n"
-               "    var dry, echo;\n"
-               "    var osc = (sub + main + detune + octave) * env;\n"
-               "    var sig = RLPF.ar(osc, sweep, 0.22);\n"
-               "    sig = LeakDC.ar(sig.tanh);\n"
-               "    dry = Splay.ar([sub * env * 0.45, sig, octave * env * 0.28], 0.48);\n"
-               "    echo = CombC.ar(dry, 0.72, [0.31, 0.47], 2.2);\n"
-               "    Limiter.ar(dry + (echo * 0.24), 0.38) * active * vol * 0.115;\n"
-               "}.play;\n"
-               ")\n";
-    }
-
-    if (role == "phrase")
-        return "(\n"
-               "{ |gate=1, fade=0.12, vol=1|\n"
-               "    var active = EnvGen.kr(Env.asr(fade, 1, fade), gate);\n"
-               "    var trig = Impulse.kr(0.28, 0.88);\n"
-               "    var freq = Demand.kr(trig, 0, Dseq([" + juce::String (phraseRoot) + ", "
-                    + juce::String (phraseRoot + 5) + ", " + juce::String (phraseRoot + 7) + ", "
-                    + juce::String (phraseRoot + 12) + ", " + juce::String (phraseRoot + 14) + "].midicps, inf));\n"
-               "    var env = EnvGen.kr(Env.perc(0.18, 2.8, curve: -3), trig);\n"
-               "    var hold = VarSaw.ar([" + juce::String (phraseRoot - 12) + ", "
-                    + juce::String (phraseRoot - 5) + "].midicps * [1, 1.003], 0, 0.42, 0.045);\n"
-               "    var sig = (SinOsc.ar(freq * [1, 1.004]) + (LFTri.ar(freq * 0.5, 0, 0.25))) * env;\n"
-               "    sig = LPF.ar(sig, 1200) + LPF.ar(hold, 900);\n"
-               "    LeakDC.ar(HPF.ar(sig, 70)) * active * vol * 0.090;\n"
-               "}.play;\n"
-               ")\n";
-
-    if (role == "bass")
-        return "(\n"
-               "{ |gate=1, fade=0.12, vol=1|\n"
-               "    var active = EnvGen.kr(Env.asr(fade, 1, fade), gate);\n"
-               "    var drift = LFNoise1.kr(0.08).range(-0.04, 0.04);\n"
-               "    var freq = (" + juce::String (bassRoot) + ").midicps * (1 + drift);\n"
-               "    var sig = (VarSaw.ar(freq * [1, 1.003], 0, 0.42) * 0.12) + SinOsc.ar(freq * 0.5, 0, 0.055);\n"
-               "    LeakDC.ar(HPF.ar(LPF.ar(sig, 260), 46)) * active * vol * 0.040;\n"
-               "}.play;\n"
-               ")\n";
-
-    if (role == "texture")
-        return "(\n"
-               "{ |gate=1, fade=0.12, vol=1|\n"
-               "    var active = EnvGen.kr(Env.asr(fade, 1, fade), gate);\n"
-               "    var slow = LFNoise1.kr(0.18).range(180, 920);\n"
-               "    var sig = RLPF.ar(PinkNoise.ar(0.11 ! 2), slow, 0.22);\n"
-               "    sig = sig + (SinOsc.ar([" + juce::String (textureHz) + ", "
-                    + juce::String (textureHz + 3) + "] * LFNoise1.kr(0.07).range(0.995, 1.01)) * 0.022);\n"
-               "    LeakDC.ar(HPF.ar(LPF.ar(sig, 2100), 65)) * active * vol * 0.042;\n"
-               "}.play;\n"
-               ")\n";
-
-    if (role == "fill")
-        return "(\n"
-               "{ |gate=1, fade=0.12, vol=1|\n"
-               "    var active = EnvGen.kr(Env.asr(fade, 1, fade), gate);\n"
-               "    var trig = Impulse.kr(3 + LFNoise0.kr(0.7).range(0, 2), 0.88);\n"
-               "    var env = Decay2.kr(trig, 0.004, TRand.kr(0.05, 0.16, trig));\n"
-               "    var freq = TRand.kr(140, 740, trig);\n"
-               "    var sig = SinOsc.ar(freq * [1, 1.012]) * env;\n"
-               "    sig = sig + (LFTri.ar(freq * 0.5, 0, 0.22) * env);\n"
-               "    Pan2.ar(Limiter.ar(LPF.ar(sig.sum, 1000), 0.18), LFNoise1.kr(1.5)) * active * vol * 0.018;\n"
-               "}.play;\n"
-               ")\n";
-
-    if (role == "break")
-        return "(\n"
-               "{ |gate=1, fade=0.12, vol=1|\n"
-               "    var active = EnvGen.kr(Env.asr(fade, 1, fade), gate);\n"
-               "    var clock = Impulse.kr(6, 0.88);\n"
-               "    var step = PulseCount.kr(clock) % 32;\n"
-               "    var kpat = Dseq([1,0,0,0, 0,0,1,0, 1,0,0,1, 0,0,1,0, 1,0,0,0, 0,1,0,0, 1,0,0,0, 0,0,0,1], inf);\n"
-               "    var spat = Dseq([0,0,1,0, 0,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,1,0, 0,0,0,0, 0,0,1,0, 0,1,0,0], inf);\n"
-               "    var hpat = Dseq([1,0,0,0, 0,1,0,0, 1,0,0,0, 0,0,0,0], inf);\n"
-               "    var ktrig = clock * Demand.kr(clock, 0, kpat);\n"
-               "    var strig = clock * Demand.kr(clock, 0, spat);\n"
-               "    var htrig = clock * Demand.kr(clock, 0, hpat) * ToggleFF.kr(Impulse.kr(0.75, 0.88));\n"
-               "    var glitch = clock * (step > 29) * (TRand.kr(0, 1, clock) > 0.72);\n"
-               "    var kick = SinOsc.ar(44 + EnvGen.kr(Env.perc(0.001, 0.045, 38, -6), ktrig)) * Decay2.kr(ktrig, 0.003, 0.095);\n"
-               "    var snare = (SinOsc.ar(176) + LFTri.ar(118, 0, 0.4)) * Decay2.kr(strig, 0.004, 0.06);\n"
-               "    var hats = SinOsc.ar(820 + Decay2.kr(htrig, 0.001, 0.018, 180)) * Decay2.kr(htrig, 0.002, 0.018);\n"
-               "    var cuts = SinOsc.ar(TRand.kr(190, 680, glitch) * [1, 1.018]) * Decay2.kr(glitch, 0.003, 0.025);\n"
-               "    var sig = (kick * 0.58) + (snare * 0.14) + (hats * 0.035) + (cuts.sum * 0.045);\n"
-               "    sig = LeakDC.ar(Compander.ar(sig, sig, 0.2, 1, 0.55, 0.004, 0.05));\n"
-               "    sig = Limiter.ar(LPF.ar(sig.tanh, 840), 0.14);\n"
-               "    Pan2.ar(sig, LFNoise1.kr(1.5).range(-0.1, 0.1)) * active * vol * 0.010;\n"
-               "}.play;\n"
-               ")\n";
-
-    if (role == "drone")
-        return "(\n"
-               "{ |gate=1, fade=0.12, vol=1|\n"
-               "    var active = EnvGen.kr(Env.asr(fade, 1, fade), gate);\n"
-               "    var freq = [" + juce::String (melodicRoot - 12) + ", " + juce::String (melodicRoot - 5) + ", "
-                    + juce::String (melodicRoot) + "].midicps;\n"
-               "    var sig = Mix(SinOsc.ar(freq * LFNoise1.kr(0.04 ! 3).range(0.996, 1.004), 0, 0.035));\n"
-               "    sig = GVerb.ar(sig, 34, 3.2, 0.38, mul: 0.028).sum ! 2;\n"
-               "    LeakDC.ar(HPF.ar(LPF.ar(sig, 1900), 70)) * active * vol * 0.056;\n"
-               "}.play;\n"
-               ")\n";
-
-    return defaultScriptFor (stateIndex, laneIndex);
 }
 
 juce::File makeTempScript (const juce::String& laneKey, const juce::String& source)
@@ -303,292 +111,6 @@ void appendRuntimeLog (const juce::String& message)
                      + "  " + message + "\n");
 }
 } // namespace
-
-struct Lane
-{
-    juce::String id;
-    juce::String name;
-    juce::String script;
-    float volume = 1.0f;
-    bool enabled = true;
-    bool muted = false;
-    bool solo = false;
-    bool playing = false;
-    int preparedBridge = -1;
-};
-
-struct LaneSnapshot
-{
-    juce::String id;
-    juce::String name;
-    juce::String script;
-    float volume = 1.0f;
-};
-
-struct State
-{
-    int index = 0;
-    juce::String name;
-    std::vector<Lane> lanes;
-};
-
-struct Rule
-{
-    int from = 0;
-    int to = 0;
-    float weight = 1.0f;
-};
-
-class MachineModel
-{
-public:
-    explicit MachineModel (juce::String machineIdToUse = "root", juce::String lanePrefixToUse = "")
-        : machineId (std::move (machineIdToUse)), lanePrefix (std::move (lanePrefixToUse))
-    {
-        setStateCount (5);
-        regenerateRingRules();
-        if (machineId == "root" && lanePrefix.isEmpty())
-            configureRootDemo();
-        else
-            configureDefaultChildDemo();
-    }
-
-    ~MachineModel() = default;
-
-    void setStateCount (int newCount)
-    {
-        newCount = juce::jlimit (1, maxStateCount, newCount);
-        const auto oldSize = static_cast<int> (states.size());
-        states.resize (static_cast<size_t> (newCount));
-        childMachines.resize (static_cast<size_t> (newCount));
-
-        for (int i = oldSize; i < newCount; ++i)
-        {
-            states[static_cast<size_t> (i)].index = i;
-            states[static_cast<size_t> (i)].name = "State " + juce::String (i + 1);
-            states[static_cast<size_t> (i)].lanes.push_back (
-                { makeLaneId (i, 0), "Lane 1", defaultScriptFor (i, 0) });
-        }
-
-        for (int i = 0; i < newCount; ++i)
-            states[static_cast<size_t> (i)].index = i;
-
-        rules.erase (std::remove_if (rules.begin(), rules.end(), [newCount] (const Rule& rule)
-        {
-            return rule.from >= newCount || rule.to >= newCount;
-        }), rules.end());
-
-        selectedState = juce::jlimit (0, newCount - 1, selectedState);
-        selectedLane = juce::jlimit (0, getLaneCount (selectedState) - 1, selectedLane);
-        entryState = juce::jlimit (0, newCount - 1, entryState);
-    }
-
-    int getStateCount() const { return static_cast<int> (states.size()); }
-    int getLaneCount (int stateIndex) const { return static_cast<int> (states[static_cast<size_t> (stateIndex)].lanes.size()); }
-
-    State& state (int index) { return states[static_cast<size_t> (index)]; }
-    const State& state (int index) const { return states[static_cast<size_t> (index)]; }
-
-    Lane& selectedLaneRef()
-    {
-        return states[static_cast<size_t> (selectedState)].lanes[static_cast<size_t> (selectedLane)];
-    }
-
-    void addLaneToSelectedState()
-    {
-        auto& s = state (selectedState);
-        const auto laneIndex = static_cast<int> (s.lanes.size());
-        s.lanes.push_back ({ makeLaneId (selectedState, laneIndex),
-                             "Lane " + juce::String (laneIndex + 1),
-                             defaultScriptFor (selectedState, laneIndex) });
-        selectedLane = laneIndex;
-    }
-
-    void removeSelectedLane()
-    {
-        auto& s = state (selectedState);
-        if (s.lanes.size() <= 1)
-            return;
-
-        s.lanes.erase (s.lanes.begin() + selectedLane);
-        selectedLane = juce::jlimit (0, static_cast<int> (s.lanes.size()) - 1, selectedLane);
-    }
-
-    void moveSelectedLane (int offset)
-    {
-        auto& s = state (selectedState);
-        const auto count = static_cast<int> (s.lanes.size());
-        const auto target = juce::jlimit (0, count - 1, selectedLane + offset);
-        if (target == selectedLane)
-            return;
-
-        std::swap (s.lanes[static_cast<size_t> (selectedLane)], s.lanes[static_cast<size_t> (target)]);
-        selectedLane = target;
-    }
-
-    void regenerateRingRules()
-    {
-        rules.clear();
-        const auto count = getStateCount();
-        for (int i = 0; i < count; ++i)
-            rules.push_back ({ i, (i + 1) % count, 1.0f });
-    }
-
-    juce::String makeLaneId (int stateIndex, int laneIndex) const
-    {
-        return lanePrefix + "s" + juce::String (stateIndex) + "-l" + juce::String (laneIndex);
-    }
-
-    bool hasChildMachine (int stateIndex) const
-    {
-        return childMachines[static_cast<size_t> (stateIndex)] != nullptr;
-    }
-
-    MachineModel* childMachine (int stateIndex)
-    {
-        return childMachines[static_cast<size_t> (stateIndex)].get();
-    }
-
-    const MachineModel* childMachine (int stateIndex) const
-    {
-        return childMachines[static_cast<size_t> (stateIndex)].get();
-    }
-
-    MachineModel& addChildToSelectedState()
-    {
-        auto childId = machineId + "_state" + juce::String (selectedState) + "_child";
-        auto childPrefix = lanePrefix + "n" + juce::String (selectedState) + "-";
-        childMachines[static_cast<size_t> (selectedState)] = std::make_unique<MachineModel> (childId, childPrefix);
-        return *childMachines[static_cast<size_t> (selectedState)];
-    }
-
-    void removeChildFromSelectedState()
-    {
-        childMachines[static_cast<size_t> (selectedState)] = nullptr;
-    }
-
-    void configureRootDemo()
-    {
-        setStateCount (6);
-        childMachines.clear();
-        childMachines.resize (states.size());
-
-        setStateDemo (0, "Intro", { { "Opening arp", "arp" }, { "Glass counter", "shimmer" }, { "Quiet motor", "phrase" } });
-        setStateDemo (1, "Verse A", { { "Main arpeggio", "arp" }, { "Low arpeggio", "arp" }, { "Soft body", "bass" }, { "Air", "texture" } });
-        setStateDemo (2, "Chorus", { { "Wide arpeggio", "arp" }, { "Upper shimmer", "shimmer" }, { "Answer arpeggio", "arp" }, { "Lift phrase", "phrase" } });
-        setStateDemo (3, "Middle", { { "Turn arp", "arp" }, { "Mirror arp", "arp" }, { "Question phrase", "phrase" }, { "Dust air", "texture" } });
-        setStateDemo (4, "Verse B", { { "Deep arpeggio", "arp" }, { "Running counter", "arp" }, { "Still phrase", "phrase" }, { "Warm air", "texture" } });
-        setStateDemo (5, "Coda", { { "Resolving arp", "arp" }, { "High return", "shimmer" }, { "Soft body", "bass" }, { "Resolve phrase", "phrase" } });
-
-        rules = {
-            { 0, 0, 7.0f }, { 0, 1, 1.0f },
-            { 1, 1, 10.5f }, { 1, 2, 1.0f }, { 1, 3, 0.18f },
-            { 2, 2, 11.0f }, { 2, 3, 1.0f }, { 2, 4, 0.28f },
-            { 3, 3, 8.5f }, { 3, 4, 1.0f }, { 3, 1, 0.22f },
-            { 4, 4, 10.0f }, { 4, 5, 1.0f }, { 4, 2, 0.18f },
-            { 5, 5, 8.0f }, { 5, 0, 1.0f }, { 5, 1, 0.2f }
-        };
-
-        childMachines[1] = std::make_unique<MachineModel> (machineId + "_groove_child", lanePrefix + "groove-");
-        configureGrooveChild (*childMachines[1]);
-
-        childMachines[3] = std::make_unique<MachineModel> (machineId + "_fracture_child", lanePrefix + "fracture-");
-        configureFractureChild (*childMachines[3]);
-
-        selectedState = 0;
-        selectedLane = 0;
-    }
-
-    void configureDefaultChildDemo()
-    {
-        setStateCount (4);
-        childMachines.clear();
-        childMachines.resize (states.size());
-        setStateDemo (0, "Cell A", { { "Accent", "arp" } });
-        setStateDemo (1, "Cell B", { { "Colour", "shimmer" } });
-        setStateDemo (2, "Cell C", { { "Answer", "phrase" } });
-        setStateDemo (3, "Cell D", { { "Bed", "texture" } });
-        rules = { { 0, 1, 1.0f }, { 1, 2, 0.8f }, { 1, 3, 0.35f }, { 2, 0, 1.0f }, { 3, 0, 1.0f } };
-    }
-
-    void configureGrooveChild (MachineModel& child)
-    {
-        child.setStateCount (4);
-        child.timingMode = NestedTimingMode::freeRun;
-        child.parentDivision = 2;
-        child.setStateDemo (0, "Figure A", { { "Soft figure", "arp" }, { "Warm air", "texture" } });
-        child.setStateDemo (1, "Figure B", { { "Middle arp", "arp" }, { "Answer phrase", "phrase" } });
-        child.setStateDemo (2, "Figure C", { { "Soft counter", "arp" }, { "Upper motes", "shimmer" } });
-        child.setStateDemo (3, "Turnaround", { { "Turn arp", "arp" } });
-        child.rules = { { 0, 0, 4.0f }, { 0, 1, 1.0f }, { 1, 1, 3.5f }, { 1, 2, 1.0f }, { 2, 2, 3.0f }, { 2, 3, 1.0f }, { 3, 0, 1.0f } };
-    }
-
-    void configureBloomChild (MachineModel& child)
-    {
-        child.setStateCount (3);
-        child.timingMode = NestedTimingMode::followParent;
-        child.parentDivision = 3;
-        child.setStateDemo (0, "Open fifth", { { "Drone fifth", "drone" } });
-        child.setStateDemo (1, "High motes", { { "Motes", "arp" }, { "Air", "texture" } });
-        child.setStateDemo (2, "Fold down", { { "Fold phrase", "phrase" } });
-        child.rules = { { 0, 1, 1.0f }, { 1, 1, 0.4f }, { 1, 2, 1.0f }, { 2, 0, 1.0f } };
-    }
-
-    void configureFractureChild (MachineModel& child)
-    {
-        child.setStateCount (5);
-        child.timingMode = NestedTimingMode::oneShot;
-        child.parentDivision = 2;
-        child.setStateDemo (0, "Question", { { "Question arp", "arp" } });
-        child.setStateDemo (1, "Lift", { { "Lift arp", "arp" }, { "Edge shimmer", "shimmer" } });
-        child.setStateDemo (2, "Drop", { { "Drop phrase", "phrase" }, { "Drop arp", "arp" } });
-        child.setStateDemo (3, "Suspension", { { "Suspended arp", "arp" }, { "Air", "texture" } });
-        child.setStateDemo (4, "Exit", { { "Exit arp", "arp" } });
-        child.rules = { { 0, 1, 1.0f }, { 1, 2, 0.75f }, { 1, 3, 0.8f }, { 2, 4, 1.0f }, { 3, 4, 1.0f }, { 4, 0, 1.0f } };
-        child.entryState = 0;
-        child.selectedState = 0;
-        child.selectedLane = 0;
-    }
-
-    void setStateDemo (int stateIndex, std::initializer_list<std::pair<const char*, const char*>> laneDefs)
-    {
-        auto& s = state (stateIndex);
-        s.name = s.name.isEmpty() ? "State " + juce::String (stateIndex + 1) : s.name;
-        s.lanes.clear();
-        int laneIndex = 0;
-        for (const auto& lane : laneDefs)
-        {
-            s.lanes.push_back ({ makeLaneId (stateIndex, laneIndex),
-                                 lane.first,
-                                 demoScript (lane.second, stateIndex, laneIndex) });
-            ++laneIndex;
-        }
-
-        if (s.lanes.empty())
-            s.lanes.push_back ({ makeLaneId (stateIndex, 0), "Lane 1", defaultScriptFor (stateIndex, 0) });
-    }
-
-    void setStateDemo (int stateIndex, const juce::String& name, std::initializer_list<std::pair<const char*, const char*>> laneDefs)
-    {
-        state (stateIndex).name = name;
-        setStateDemo (stateIndex, laneDefs);
-    }
-
-    std::vector<State> states;
-    std::vector<std::unique_ptr<MachineModel>> childMachines;
-    std::vector<Rule> rules;
-    juce::String machineId;
-    juce::String lanePrefix;
-    NestedTimingMode timingMode = NestedTimingMode::followParent;
-    int parentDivision = 1;
-    int parentTickCounter = 0;
-    bool oneShotComplete = false;
-    bool latchedActive = false;
-    int selectedState = 0;
-    int selectedLane = 0;
-    int entryState = 0;
-    int stepsSinceEntry = 0;
-};
 
 class SuperColliderHost
 {
@@ -664,6 +186,8 @@ public:
     void setLaneVolume (Lane& lane)
     {
         lane.volume = juce::jlimit (0.0f, 1.0f, lane.volume);
+        if (! lane.playing)
+            lane.preparedBridge = -1;
 
         const juce::ScopedLock lock (hostLock);
 
@@ -945,8 +469,6 @@ private:
                "            if (program.notNil) {\n"
                "                ~markovStopTokens.removeAt(key);\n"
                "                ~markovObjects[key] = program.value;\n"
-               "                obj = ~markovObjects[key];\n"
-               "                if (obj.notNil and: { obj.respondsTo(\\set) }) { obj.set(\\vol, ~markovVolumes[key] ? 1) };\n"
                "            };\n"
                "        };\n"
                "    });\n"
@@ -1208,8 +730,48 @@ public:
 
     void setMachine (MachineModel& machineToUse)
     {
+        if (machine != &machineToUse)
+        {
+            manualNodeOffsets.clear();
+            fitView();
+        }
+
         machine = &machineToUse;
         repaint();
+    }
+
+    void fitView()
+    {
+        zoom = 1.0f;
+        panOffset = {};
+        repaint();
+    }
+
+    void resetLayout()
+    {
+        finishNestedStateCountEdit (false);
+        ensureManualOffsetSize();
+        std::fill (manualNodeOffsets.begin(), manualNodeOffsets.end(), juce::Point<float> {});
+        fitView();
+    }
+
+    bool keyPressed (const juce::KeyPress& key) override
+    {
+        const auto keyCode = key.getKeyCode();
+
+        if (keyCode == 'f' || keyCode == 'F')
+        {
+            fitView();
+            return true;
+        }
+
+        if (keyCode == 'r' || keyCode == 'R')
+        {
+            resetLayout();
+            return true;
+        }
+
+        return false;
     }
 
     void paint (juce::Graphics& g) override
@@ -1226,13 +788,28 @@ public:
 
     void mouseDown (const juce::MouseEvent& event) override
     {
+        grabKeyboardFocus();
         dragStart = event.position;
         panStart = panOffset;
+        draggingStateIndex = -1;
+        draggedState = false;
+
+        if (event.mods.isPopupMenu() || event.mods.isMiddleButtonDown() || event.mods.isAltDown())
+            return;
 
         for (int i = 0; i < static_cast<int> (statePositions.size()); ++i)
         {
             if (auto* child = machine->childMachine (i))
             {
+                const auto secondLayerBadge = hitTestSecondLayerBadge (*child, statePositions[static_cast<size_t> (i)], event.position);
+                if (secondLayerBadge >= 0)
+                {
+                    if (auto* grandchild = child->childMachine (secondLayerBadge))
+                        if (onSecondLayerNestedStateChosen)
+                            onSecondLayerNestedStateChosen (i, secondLayerBadge, grandchild->selectedState);
+                    return;
+                }
+
                 const auto secondLayerState = hitTestSecondLayerNestedState (*child, statePositions[static_cast<size_t> (i)], event.position);
                 if (secondLayerState.first >= 0 && secondLayerState.second >= 0)
                 {
@@ -1266,6 +843,9 @@ public:
         {
             if (statePositions[static_cast<size_t> (i)].getDistanceFrom (event.position) < stateRadius)
             {
+                ensureManualOffsetSize();
+                draggingStateIndex = i;
+                nodeOffsetStart = manualNodeOffsets[static_cast<size_t> (i)];
                 machine->selectedState = i;
                 machine->selectedLane = 0;
                 if (onStateChosen)
@@ -1274,6 +854,7 @@ public:
                 return;
             }
         }
+
     }
 
     void mouseDrag (const juce::MouseEvent& event) override
@@ -1282,8 +863,25 @@ public:
         if (delta.getDistanceFromOrigin() < 2.0f)
             return;
 
-        panOffset = panStart + delta;
+        if (draggingStateIndex >= 0)
+        {
+            ensureManualOffsetSize();
+            const auto graphDelta = delta / juce::jmax (0.001f, zoom);
+            manualNodeOffsets[static_cast<size_t> (draggingStateIndex)] = nodeOffsetStart + graphDelta;
+            draggedState = true;
+        }
+        else
+        {
+            panOffset = panStart + delta;
+        }
+
         repaint();
+    }
+
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        draggingStateIndex = -1;
+        draggedState = false;
     }
 
     void mouseWheelMove (const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) override
@@ -1332,19 +930,20 @@ private:
     {
         const auto count = machine->getStateCount();
         statePositions.resize (static_cast<size_t> (count));
+        ensureManualOffsetSize();
 
         stateRadius = juce::jmap (static_cast<float> (count), 1.0f, static_cast<float> (maxStateCount), 54.0f, 34.0f);
         stateRadius = juce::jlimit (34.0f, 54.0f, stateRadius);
 
-        const auto outerMargin = getOuterNodeExtent() + 20.0f;
+        const auto outerMargin = getOuterNodeExtent() + 28.0f;
         auto area = getLocalBounds().toFloat().reduced (outerMargin, outerMargin * 0.78f);
-        const auto maxLayoutWidth = area.getHeight() * 3.35f;
+        const auto maxLayoutWidth = area.getHeight() * 4.25f;
         if (area.getWidth() > maxLayoutWidth)
             area = area.withSizeKeepingCentre (maxLayoutWidth, area.getHeight());
 
         auto centre = area.getCentre();
-        auto rx = area.getWidth() * 0.48f;
-        auto ry = area.getHeight() * 0.44f;
+        auto rx = area.getWidth() * 0.50f;
+        auto ry = area.getHeight() * 0.47f;
 
         for (int i = 0; i < count; ++i)
         {
@@ -1355,7 +954,24 @@ private:
         }
 
         relaxStatePositions (area);
+        applyManualNodeOffsets();
         applyViewTransformToLayout();
+    }
+
+    void ensureManualOffsetSize()
+    {
+        const auto count = static_cast<size_t> (machine->getStateCount());
+        if (manualNodeOffsets.size() != count)
+            manualNodeOffsets.resize (count, {});
+    }
+
+    void applyManualNodeOffsets()
+    {
+        for (int i = 0; i < static_cast<int> (statePositions.size()); ++i)
+        {
+            auto& p = statePositions[static_cast<size_t> (i)];
+            p += manualNodeOffsets[static_cast<size_t> (i)];
+        }
     }
 
     void applyViewTransformToLayout()
@@ -1384,7 +1000,7 @@ private:
         if (count < 2)
             return;
 
-        constexpr int iterations = 90;
+        constexpr int iterations = 150;
         for (int pass = 0; pass < iterations; ++pass)
         {
             for (int a = 0; a < count; ++a)
@@ -1409,7 +1025,7 @@ private:
                     delta.x /= distance;
                     delta.y /= distance;
 
-                    const auto push = (minDistance - distance) * 0.52f;
+                    const auto push = (minDistance - distance) * 0.68f;
                     pa -= delta * push;
                     pb += delta * push;
                 }
@@ -1713,20 +1329,44 @@ private:
 
     float getOuterNodeExtent() const
     {
-        for (int i = 0; i < machine->getStateCount(); ++i)
-            if (machine->childMachine (i) != nullptr)
-                return getNestedOrbitRadius() + getSecondLayerOrbitRadius() + 14.0f;
+        auto extent = stateRadius * 1.55f;
 
-        return stateRadius * 1.55f;
+        for (int i = 0; i < machine->getStateCount(); ++i)
+            extent = juce::jmax (extent, getNodeVisualExtent (i));
+
+        return extent;
     }
 
     float getNodeClearance (int stateIndex) const
     {
-        auto extent = stateRadius * 1.55f;
-        if (machine->childMachine (stateIndex) != nullptr)
-            extent = getNestedOrbitRadius() + getSecondLayerOrbitRadius() + 11.0f;
+        return getNodeVisualExtent (stateIndex) + 22.0f;
+    }
 
-        return extent + 8.0f;
+    float getNodeVisualExtent (int stateIndex) const
+    {
+        auto extent = stateRadius * 1.55f;
+        const auto* child = machine->childMachine (stateIndex);
+
+        if (child == nullptr)
+            return extent;
+
+        extent = getNestedOrbitRadius() + getNestedNodeRadius (child->getStateCount()) + 10.0f;
+
+        if (childHasGrandchildren (*child))
+            extent += getSecondLayerOrbitRadius() + getSecondLayerBadgeOuterExtent() + 18.0f;
+        else
+            extent += getNestedBadgeOuterExtent() + 8.0f;
+
+        return extent;
+    }
+
+    bool childHasGrandchildren (const MachineModel& child) const
+    {
+        for (int i = 0; i < child.getStateCount(); ++i)
+            if (child.childMachine (i) != nullptr)
+                return true;
+
+        return false;
     }
 
     float getNestedOrbitRadius() const
@@ -1737,6 +1377,18 @@ private:
     float getNestedNodeRadius (int childCount) const
     {
         return childCount > 7 || stateRadius < 40.0f ? 2.5f : 3.7f;
+    }
+
+    float getNestedBadgeOuterExtent() const
+    {
+        const auto badgeWidth = stateRadius < 40.0f ? 24.0f : 28.0f;
+        return badgeWidth * 1.45f;
+    }
+
+    float getSecondLayerBadgeOuterExtent() const
+    {
+        const auto scale = juce::jlimit (0.9f, 1.8f, stateRadius / 54.0f);
+        return 20.0f * scale * 1.55f;
     }
 
     float getSecondLayerOrbitRadius() const
@@ -1849,6 +1501,10 @@ private:
     juce::Point<float> panOffset;
     juce::Point<float> dragStart;
     juce::Point<float> panStart;
+    std::vector<juce::Point<float>> manualNodeOffsets;
+    juce::Point<float> nodeOffsetStart;
+    int draggingStateIndex = -1;
+    bool draggedState = false;
     int editingNestedParentState = -1;
     int editingSecondLayerChildState = -1;
 
@@ -2408,6 +2064,8 @@ public:
         addAndMakeVisible (stopAllButton);
         addAndMakeVisible (rateSlider);
         addAndMakeVisible (graph);
+        addAndMakeVisible (graphFitButton);
+        addAndMakeVisible (graphLayoutButton);
         addAndMakeVisible (rules);
         addAndMakeVisible (graphBottomDivider);
         addAndMakeVisible (rulesTracksDivider);
@@ -2602,6 +2260,11 @@ public:
         rateSlider.setRange (0.2, 4.0, 0.1);
         rateSlider.setValue (0.25);
         rateSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 48, 22);
+
+        graphFitButton.setButtonText ("Fit");
+        graphLayoutButton.setButtonText ("Layout");
+        graphFitButton.onClick = [this] { graph.fitView(); };
+        graphLayoutButton.onClick = [this] { graph.resetLayout(); };
 
         runButton.onClick = [this]
         {
@@ -2944,6 +2607,8 @@ public:
         topStateCountEditor.setBounds (topCountArea.removeFromLeft (42).reduced (2, 0));
         topStateCountPlus.setBounds (topCountArea.removeFromLeft (28).reduced (2, 0));
         rateSlider.setBounds (header.removeFromRight (150).reduced (6, 8));
+        graphLayoutButton.setBounds (header.removeFromRight (68).reduced (4, 8));
+        graphFitButton.setBounds (header.removeFromRight (46).reduced (4, 8));
         logButton.setBounds (header.removeFromRight (56).reduced (4, 8));
         panicButton.setBounds (header.removeFromRight (74).reduced (4, 8));
         stopAllButton.setBounds (header.removeFromRight (86).reduced (4, 8));
@@ -3609,6 +3274,8 @@ private:
     std::vector<MachineModel*> machineStack;
     SuperColliderHost host;
     GraphComponent graph;
+    juce::TextButton graphFitButton;
+    juce::TextButton graphLayoutButton;
     RuleListComponent rules;
     PaneDivider graphBottomDivider { PaneDivider::Orientation::horizontal };
     PaneDivider rulesTracksDivider;
