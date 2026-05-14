@@ -78,6 +78,35 @@ public:
         repaint();
     }
 
+    void setTimingPulse (const juce::String& machineIdToUse, int stateIndexToUse, float phaseToUse, int beatIndexToUse, int beatCountToUse)
+    {
+        pulseMachineId = machineIdToUse;
+        pulseStateIndex = stateIndexToUse;
+        pulsePhase = juce::jlimit (0.0f, 1.0f, phaseToUse);
+        pulseBeatIndex = beatIndexToUse;
+        pulseBeatCount = juce::jmax (1, beatCountToUse);
+        pulseReceivedMs = juce::Time::getMillisecondCounterHiRes();
+        repaint();
+    }
+
+    void clearTimingPulse()
+    {
+        pulseMachineId.clear();
+        pulseStateIndex = -1;
+        pulsePhase = 0.0f;
+        pulseReceivedMs = 0.0;
+        previewStateIndex = -1;
+        previewProbability = 0.0f;
+        repaint();
+    }
+
+    void setTransitionPreview (int stateIndex, float probability)
+    {
+        previewStateIndex = stateIndex;
+        previewProbability = juce::jlimit (0.0f, 1.0f, probability);
+        repaint();
+    }
+
     void fitView()
     {
         zoom = 1.0f;
@@ -482,9 +511,10 @@ private:
         {
             auto p = statePositions[static_cast<size_t> (i)];
             auto selected = i == machine->selectedState;
+            const auto previewed = i == previewStateIndex && i != machine->selectedState;
             auto laneCount = machine->getLaneCount (i);
 
-            juce::ColourGradient glow (selected ? accentA().withAlpha (0.55f) : accentC().withAlpha (0.18f),
+            juce::ColourGradient glow (selected ? accentA().withAlpha (0.55f) : (previewed ? accentB().withAlpha (0.30f) : accentC().withAlpha (0.18f)),
                                        p.translated (-stateRadius, -stateRadius),
                                        juce::Colours::transparentBlack,
                                        p.translated (stateRadius, stateRadius),
@@ -492,11 +522,27 @@ private:
             g.setGradientFill (glow);
             g.fillEllipse (p.x - stateRadius * 1.55f, p.y - stateRadius * 1.55f, stateRadius * 3.1f, stateRadius * 3.1f);
 
+            if (selected)
+            {
+                juce::ColourGradient liveGlow (accentB().withAlpha (0.34f),
+                                               p.translated (-stateRadius * 1.7f, -stateRadius * 1.7f),
+                                               juce::Colours::transparentBlack,
+                                               p.translated (stateRadius * 1.7f, stateRadius * 1.7f),
+                                               true);
+                g.setGradientFill (liveGlow);
+                g.fillEllipse (p.x - stateRadius * 1.9f, p.y - stateRadius * 1.9f, stateRadius * 3.8f, stateRadius * 3.8f);
+            }
+
             g.setColour (selected ? selectedFill() : juce::Colour (0xff252a31));
             g.fillEllipse (p.x - stateRadius, p.y - stateRadius, stateRadius * 2.0f, stateRadius * 2.0f);
 
             g.setColour ((selected ? accentA() : mutedInk()).withAlpha (0.95f));
             g.drawEllipse (p.x - stateRadius, p.y - stateRadius, stateRadius * 2.0f, stateRadius * 2.0f, selected ? 3.0f : 1.5f);
+            if (selected)
+                drawActiveStateRing (g, p);
+            if (previewed)
+                drawPreviewStateRing (g, p);
+            drawTimingPulse (g, i, p, selected);
 
             const auto* child = machine->childMachine (i);
             if (child != nullptr)
@@ -522,6 +568,8 @@ private:
                                                     static_cast<int> (stateRadius * 1.8f), 18),
                               juce::Justification::centred, 1);
         }
+
+        drawStateBadgesOverlay (g);
     }
 
     void drawNestedIndicator (juce::Graphics& g, const MachineModel& child, juce::Point<float> parentCentre, bool parentSelected, bool childInspected)
@@ -623,6 +671,107 @@ private:
         g.setColour (ink().withAlpha (0.95f));
         g.setFont (juce::FontOptions (8.8f, juce::Font::bold));
         g.drawFittedText (juce::String (count), badge.toNearestInt(), juce::Justification::centred, 1);
+    }
+
+    void drawActiveStateRing (juce::Graphics& g, juce::Point<float> centre)
+    {
+        const auto outerRadius = stateRadius + 5.0f;
+        const auto markerAlpha = pulseReceivedMs > 0.0
+            ? juce::jlimit (0.62f, 0.96f, 0.96f - static_cast<float> ((juce::Time::getMillisecondCounterHiRes() - pulseReceivedMs) / 1800.0))
+            : 0.78f;
+
+        g.setColour (accentB().withAlpha (markerAlpha));
+        g.drawEllipse (centre.x - outerRadius, centre.y - outerRadius, outerRadius * 2.0f, outerRadius * 2.0f, 2.4f);
+    }
+
+    void drawActiveStateBadge (juce::Graphics& g, juce::Point<float> centre)
+    {
+        auto badge = juce::Rectangle<float> (0.0f, 0.0f, 42.0f, 18.0f)
+                         .withCentre ({ centre.x, centre.y - stateRadius - 18.0f });
+        g.setColour (juce::Colour (0xff101318).withAlpha (0.94f));
+        g.fillRoundedRectangle (badge, 5.0f);
+        g.setColour (accentB().withAlpha (0.92f));
+        g.drawRoundedRectangle (badge, 5.0f, 1.1f);
+        g.setColour (ink());
+        g.setFont (juce::FontOptions (9.2f, juce::Font::bold));
+        g.drawFittedText ("LIVE", badge.toNearestInt(), juce::Justification::centred, 1);
+    }
+
+    void drawPreviewStateRing (juce::Graphics& g, juce::Point<float> centre)
+    {
+        const auto outerRadius = stateRadius + 4.0f;
+        g.setColour (accentB().withAlpha (0.58f));
+        g.drawEllipse (centre.x - outerRadius, centre.y - outerRadius, outerRadius * 2.0f, outerRadius * 2.0f, 1.9f);
+    }
+
+    void drawPreviewStateBadge (juce::Graphics& g, juce::Point<float> centre)
+    {
+        const auto percent = juce::roundToInt (previewProbability * 100.0f);
+        auto badge = juce::Rectangle<float> (0.0f, 0.0f, 54.0f, 18.0f)
+                         .withCentre ({ centre.x, centre.y - stateRadius - 16.0f });
+        g.setColour (juce::Colour (0xff101318).withAlpha (0.92f));
+        g.fillRoundedRectangle (badge, 5.0f);
+        g.setColour (accentB().withAlpha (0.78f));
+        g.drawRoundedRectangle (badge, 5.0f, 1.0f);
+        g.setColour (ink().withAlpha (0.92f));
+        g.setFont (juce::FontOptions (8.6f, juce::Font::bold));
+        g.drawFittedText ("NEXT " + juce::String (percent) + "%", badge.toNearestInt(), juce::Justification::centred, 1);
+    }
+
+    void drawStateBadgesOverlay (juce::Graphics& g)
+    {
+        if (machine == nullptr || statePositions.empty())
+            return;
+
+        const auto active = machine->selectedState;
+        if (active >= 0 && active < static_cast<int> (statePositions.size()))
+            drawActiveStateBadge (g, statePositions[static_cast<size_t> (active)]);
+
+        if (previewStateIndex >= 0
+            && previewStateIndex != active
+            && previewStateIndex < static_cast<int> (statePositions.size()))
+            drawPreviewStateBadge (g, statePositions[static_cast<size_t> (previewStateIndex)]);
+    }
+
+    void drawTimingPulse (juce::Graphics& g, int stateIndex, juce::Point<float> centre, bool selected)
+    {
+        if (! selected || pulseMachineId != machine->machineId || pulseStateIndex != stateIndex)
+            return;
+
+        const auto ageMs = juce::Time::getMillisecondCounterHiRes() - pulseReceivedMs;
+        if (ageMs > 2200.0)
+            return;
+
+        const auto beatFlash = juce::jlimit (0.0f, 1.0f, 1.0f - static_cast<float> (ageMs / 420.0));
+        const auto progressRadius = stateRadius + 11.0f;
+        const auto startAngle = -juce::MathConstants<float>::halfPi;
+        const auto endAngle = startAngle + juce::MathConstants<float>::twoPi * pulsePhase;
+
+        juce::Path progress;
+        progress.addCentredArc (centre.x, centre.y, progressRadius, progressRadius, 0.0f,
+                                startAngle, endAngle, true);
+        g.setColour (accentA().withAlpha (0.30f));
+        g.strokePath (progress, juce::PathStrokeType (3.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+        if (beatFlash > 0.0f)
+        {
+            g.setColour (accentB().withAlpha (0.16f * beatFlash));
+            const auto flareRadius = stateRadius * (1.25f + 0.34f * (1.0f - beatFlash));
+            g.fillEllipse (centre.x - flareRadius, centre.y - flareRadius, flareRadius * 2.0f, flareRadius * 2.0f);
+        }
+
+        if (pulseBeatCount > 1)
+        {
+            const auto dotRadius = 2.1f;
+            for (int beat = 0; beat < pulseBeatCount; ++beat)
+            {
+                const auto angle = startAngle + juce::MathConstants<float>::twoPi * static_cast<float> (beat) / static_cast<float> (pulseBeatCount);
+                const auto dot = juce::Point<float> { centre.x + std::cos (angle) * progressRadius,
+                                                      centre.y + std::sin (angle) * progressRadius };
+                g.setColour ((beat == pulseBeatIndex ? accentA() : mutedInk()).withAlpha (beat == pulseBeatIndex ? 0.95f : 0.35f));
+                g.fillEllipse (dot.x - dotRadius, dot.y - dotRadius, dotRadius * 2.0f, dotRadius * 2.0f);
+            }
+        }
     }
 
     int hitTestNestedState (const MachineModel& child, juce::Point<float> parentCentre, juce::Point<float> pointer) const
@@ -904,6 +1053,14 @@ private:
     float lockedScreenRadius = 48.0f;
     float zoom = 1.0f;
     juce::Point<float> panOffset;
+    juce::String pulseMachineId;
+    int pulseStateIndex = -1;
+    float pulsePhase = 0.0f;
+    int pulseBeatIndex = 0;
+    int pulseBeatCount = 1;
+    double pulseReceivedMs = 0.0;
+    int previewStateIndex = -1;
+    float previewProbability = 0.0f;
     juce::Point<float> dragStart;
     juce::Point<float> panStart;
     std::vector<juce::Point<float>> manualNodeOffsets;
@@ -1191,6 +1348,128 @@ private:
     int selectedIndex = 0;
 };
 
+class FsmNavigatorComponent final : public juce::Component
+{
+public:
+    std::function<void (MachineModel*, int)> onStateChosen;
+
+    void setMachines (MachineModel& rootMachine, MachineModel* active, MachineModel* inspected)
+    {
+        root = &rootMachine;
+        activeMachine = active;
+        inspectedMachine = inspected;
+        rebuildRows();
+        repaint();
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto bounds = getLocalBounds().toFloat();
+        g.setColour (juce::Colour (0xff171b20));
+        g.fillRoundedRectangle (bounds, 6.0f);
+
+        g.setColour (ink());
+        g.setFont (juce::FontOptions (12.5f, juce::Font::bold));
+        g.drawFittedText ("Navigator", getLocalBounds().reduced (10, 6).removeFromTop (18),
+                          juce::Justification::centredLeft, 1);
+
+        for (const auto& row : rows)
+        {
+            const auto selected = row.machine == inspectedMachine && row.stateIndex == row.machine->selectedState;
+            const auto active = row.machine == activeMachine;
+            auto r = row.bounds.toFloat();
+
+            if (selected)
+            {
+                g.setColour (inspectedFill().withAlpha (0.95f));
+                g.fillRoundedRectangle (r.reduced (2.0f, 1.0f), 4.0f);
+                g.setColour (accentB().withAlpha (0.86f));
+                g.drawRoundedRectangle (r.reduced (2.0f, 1.0f), 4.0f, 1.2f);
+            }
+
+            const auto dotX = static_cast<float> (row.bounds.getX() + 10 + row.depth * 14);
+            const auto dotY = static_cast<float> (row.bounds.getCentreY());
+            g.setColour (active ? accentA() : paletteColour (row.depth + row.stateIndex));
+            g.fillEllipse (dotX - 3.5f, dotY - 3.5f, 7.0f, 7.0f);
+
+            g.setColour (selected ? ink() : mutedInk());
+            g.setFont (juce::FontOptions (11.5f, selected ? juce::Font::bold : juce::Font::plain));
+            auto textArea = row.bounds.withTrimmedLeft (22 + row.depth * 14).withTrimmedRight (48);
+            g.drawFittedText (row.name, textArea, juce::Justification::centredLeft, 1);
+
+            g.setColour (mutedInk().withAlpha (0.72f));
+            g.setFont (juce::FontOptions (10.0f));
+            g.drawFittedText (row.detail, row.bounds.withTrimmedLeft (row.bounds.getWidth() - 50).reduced (4, 0),
+                              juce::Justification::centredRight, 1);
+        }
+    }
+
+    void mouseDown (const juce::MouseEvent& event) override
+    {
+        for (const auto& row : rows)
+        {
+            if (row.bounds.contains (event.getPosition()))
+            {
+                if (onStateChosen)
+                    onStateChosen (row.machine, row.stateIndex);
+                return;
+            }
+        }
+    }
+
+    void resized() override
+    {
+        rebuildRows();
+    }
+
+private:
+    struct Row
+    {
+        MachineModel* machine = nullptr;
+        int stateIndex = 0;
+        int depth = 0;
+        juce::String name;
+        juce::String detail;
+        juce::Rectangle<int> bounds;
+    };
+
+    void rebuildRows()
+    {
+        rows.clear();
+        if (root == nullptr)
+            return;
+
+        auto area = getLocalBounds().reduced (8, 30);
+        addRowsForMachine (*root, 0, area);
+    }
+
+    void addRowsForMachine (MachineModel& model, int depth, juce::Rectangle<int>& area)
+    {
+        for (int i = 0; i < model.getStateCount(); ++i)
+        {
+            if (area.getHeight() < rowHeight)
+                return;
+
+            const auto& state = model.state (i);
+            const auto laneCount = static_cast<int> (state.lanes.size());
+            auto detail = juce::String (laneCount) + (laneCount == 1 ? " trk" : " trks");
+            if (model.hasChildMachine (i))
+                detail = juce::String (model.childMachine (i)->getStateCount()) + " FSM";
+
+            rows.push_back ({ &model, i, depth, state.name, detail, area.removeFromTop (rowHeight) });
+
+            if (auto* child = model.childMachine (i))
+                addRowsForMachine (*child, depth + 1, area);
+        }
+    }
+
+    static constexpr int rowHeight = 24;
+    MachineModel* root = nullptr;
+    MachineModel* activeMachine = nullptr;
+    MachineModel* inspectedMachine = nullptr;
+    std::vector<Row> rows;
+};
+
 class ClickableLabel final : public juce::Label
 {
 public:
@@ -1216,6 +1495,7 @@ public:
     {
         state = &stateToShow;
         selectedIndex = selectedLane;
+        clampScroll();
         repaint();
     }
 
@@ -1228,44 +1508,54 @@ public:
         if (state == nullptr)
             return;
 
-        auto list = getTrackListBounds();
-        for (int i = 0; i < static_cast<int> (state->lanes.size()); ++i)
         {
-            auto row = list.removeFromTop (43).reduced (0, 4);
-            const auto& lane = state->lanes[static_cast<size_t> (i)];
-            const auto selected = i == selectedIndex;
+            juce::Graphics::ScopedSaveState saveState (g);
+            g.reduceClipRegion (getTrackViewportBounds());
 
-            const auto laneColour = getTrackColour (i);
-            g.setColour (selected ? selectedRow() : juce::Colour (0xff20252c).withAlpha (lane.enabled ? 1.0f : 0.48f));
-            g.fillRoundedRectangle (row.toFloat(), 5.0f);
-            if (selected)
+            auto list = getTrackListBounds();
+            for (int i = 0; i < static_cast<int> (state->lanes.size()); ++i)
             {
-                g.setColour (laneColour.withAlpha (0.45f));
-                g.fillRoundedRectangle (row.withWidth (5).toFloat(), 3.0f);
+                auto row = list.removeFromTop (43).reduced (0, 4);
+                if (row.getBottom() < 0 || row.getY() > getHeight())
+                    continue;
+
+                const auto& lane = state->lanes[static_cast<size_t> (i)];
+                const auto selected = i == selectedIndex;
+
+                const auto laneColour = getTrackColour (i);
+                g.setColour (selected ? selectedRow() : juce::Colour (0xff20252c).withAlpha (lane.enabled ? 1.0f : 0.48f));
+                g.fillRoundedRectangle (row.toFloat(), 5.0f);
+                if (selected)
+                {
+                    g.setColour (laneColour.withAlpha (0.45f));
+                    g.fillRoundedRectangle (row.withWidth (5).toFloat(), 3.0f);
+                }
+
+                g.setColour (selected ? laneColour.withAlpha (0.95f) : juce::Colour (0xff414a55));
+                g.drawRoundedRectangle (row.toFloat(), 5.0f, selected ? 1.4f : 0.8f);
+
+                auto rowText = row.reduced (10, 0);
+                auto dotArea = rowText.removeFromLeft (12).withSizeKeepingCentre (8, 8).toFloat();
+                g.setColour (laneColour.withAlpha (lane.enabled ? (lane.playing ? 0.96f : 0.72f) : 0.28f));
+                g.fillEllipse (dotArea);
+                g.setColour (lane.playing ? ink().withAlpha (0.85f) : juce::Colour (0xff101318).withAlpha (0.8f));
+                g.drawEllipse (dotArea.expanded (1.0f), lane.playing ? 1.4f : 0.8f);
+
+                auto buttons = rowText.removeFromRight (82);
+                drawToggle (g, buttons.removeFromLeft (25), "E", lane.enabled, accentB());
+                drawToggle (g, buttons.removeFromLeft (25), "M", lane.muted, accentC());
+                drawToggle (g, buttons.removeFromLeft (25), "S", lane.solo, accentA());
+
+                auto volumeArea = rowText.removeFromRight (68).reduced (8, 0);
+                drawVolumeControl (g, volumeArea, lane.volume, laneColour, lane.enabled);
+
+                g.setColour (selected ? ink() : mutedInk().withAlpha (lane.enabled ? 1.0f : 0.52f));
+                g.setFont (juce::FontOptions (12.5f, selected ? juce::Font::bold : juce::Font::plain));
+                g.drawFittedText (lane.name, rowText, juce::Justification::centredLeft, 1);
             }
-
-            g.setColour (selected ? laneColour.withAlpha (0.95f) : juce::Colour (0xff414a55));
-            g.drawRoundedRectangle (row.toFloat(), 5.0f, selected ? 1.4f : 0.8f);
-
-            auto rowText = row.reduced (10, 0);
-            auto dotArea = rowText.removeFromLeft (12).withSizeKeepingCentre (8, 8).toFloat();
-            g.setColour (laneColour.withAlpha (lane.enabled ? (lane.playing ? 0.96f : 0.72f) : 0.28f));
-            g.fillEllipse (dotArea);
-            g.setColour (lane.playing ? ink().withAlpha (0.85f) : juce::Colour (0xff101318).withAlpha (0.8f));
-            g.drawEllipse (dotArea.expanded (1.0f), lane.playing ? 1.4f : 0.8f);
-
-            auto buttons = rowText.removeFromRight (82);
-            drawToggle (g, buttons.removeFromLeft (25), "E", lane.enabled, accentB());
-            drawToggle (g, buttons.removeFromLeft (25), "M", lane.muted, accentC());
-            drawToggle (g, buttons.removeFromLeft (25), "S", lane.solo, accentA());
-
-            auto volumeArea = rowText.removeFromRight (68).reduced (8, 0);
-            drawVolumeControl (g, volumeArea, lane.volume, laneColour, lane.enabled);
-
-            g.setColour (selected ? ink() : mutedInk().withAlpha (lane.enabled ? 1.0f : 0.52f));
-            g.setFont (juce::FontOptions (12.5f, selected ? juce::Font::bold : juce::Font::plain));
-            g.drawFittedText (lane.name, rowText, juce::Justification::centredLeft, 1);
         }
+
+        drawScrollBar (g);
     }
 
     void mouseDown (const juce::MouseEvent& event) override
@@ -1324,6 +1614,18 @@ public:
     void mouseUp (const juce::MouseEvent&) override
     {
         draggingVolumeIndex = -1;
+    }
+
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& wheel) override
+    {
+        scrollOffset -= wheel.deltaY * 92.0f;
+        clampScroll();
+        repaint();
+    }
+
+    void resized() override
+    {
+        clampScroll();
     }
 
 private:
@@ -1389,12 +1691,51 @@ private:
 
     juce::Rectangle<int> getTrackListBounds() const
     {
+        return getTrackViewportBounds().translated (0, -juce::roundToInt (scrollOffset));
+    }
+
+    juce::Rectangle<int> getTrackViewportBounds() const
+    {
         return getLocalBounds().reduced (8, 8);
+    }
+
+    int getContentHeight() const
+    {
+        return state == nullptr ? 0 : static_cast<int> (state->lanes.size()) * 43;
+    }
+
+    int getViewportHeight() const
+    {
+        return getLocalBounds().reduced (8, 8).getHeight();
+    }
+
+    void clampScroll()
+    {
+        const auto maxScroll = juce::jmax (0.0f, static_cast<float> (getContentHeight() - getViewportHeight()));
+        scrollOffset = juce::jlimit (0.0f, maxScroll, scrollOffset);
+    }
+
+    void drawScrollBar (juce::Graphics& g) const
+    {
+        const auto contentHeight = getContentHeight();
+        const auto viewportHeight = getViewportHeight();
+        if (contentHeight <= viewportHeight || viewportHeight <= 0)
+            return;
+
+        auto track = getLocalBounds().reduced (3, 10).removeFromRight (4).toFloat();
+        const auto thumbHeight = juce::jmax (22.0f, track.getHeight() * static_cast<float> (viewportHeight) / static_cast<float> (contentHeight));
+        const auto maxScroll = static_cast<float> (contentHeight - viewportHeight);
+        const auto thumbY = track.getY() + (track.getHeight() - thumbHeight) * (scrollOffset / juce::jmax (1.0f, maxScroll));
+        g.setColour (accentB().withAlpha (0.12f));
+        g.fillRoundedRectangle (track, 2.0f);
+        g.setColour (accentB().withAlpha (0.62f));
+        g.fillRoundedRectangle (track.withY (thumbY).withHeight (thumbHeight), 2.0f);
     }
 
     State* state = nullptr;
     int selectedIndex = 0;
     int draggingVolumeIndex = -1;
+    float scrollOffset = 0.0f;
 };
 
 class MixerComponent final : public juce::Component,
@@ -1418,6 +1759,7 @@ public:
         state = &stateToShow;
         selectedIndex = selectedLane;
         transportRunning = running;
+        clampScroll();
         repaint();
     }
 
@@ -1439,12 +1781,23 @@ public:
         g.setFont (juce::FontOptions (10.5f, juce::Font::bold));
         g.drawText (transportRunning ? "LIVE" : "IDLE", header, juce::Justification::centredRight);
 
-        area.removeFromTop (3);
-        for (int i = 0; i < static_cast<int> (state->lanes.size()); ++i)
         {
-            auto row = area.removeFromTop (58).reduced (0, 4);
-            drawLaneStrip (g, row, i);
+            juce::Graphics::ScopedSaveState saveState (g);
+            g.reduceClipRegion (area);
+
+            auto rowArea = area.translated (0, -juce::roundToInt (scrollOffset));
+            rowArea.removeFromTop (3);
+            for (int i = 0; i < static_cast<int> (state->lanes.size()); ++i)
+            {
+                auto row = rowArea.removeFromTop (58).reduced (0, 4);
+                if (row.getBottom() < area.getY() || row.getY() > area.getBottom())
+                    continue;
+
+                drawLaneStrip (g, row, i);
+            }
         }
+
+        drawScrollBar (g, area);
     }
 
     void mouseDown (const juce::MouseEvent& event) override
@@ -1503,6 +1856,18 @@ public:
     void mouseUp (const juce::MouseEvent&) override
     {
         draggingVolumeIndex = -1;
+    }
+
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& wheel) override
+    {
+        scrollOffset -= wheel.deltaY * 112.0f;
+        clampScroll();
+        repaint();
+    }
+
+    void resized() override
+    {
+        clampScroll();
     }
 
 private:
@@ -1601,9 +1966,16 @@ private:
 
     juce::Rectangle<int> getRowBounds (int index) const
     {
-        auto area = getLocalBounds().reduced (10, 9);
-        area.removeFromTop (33);
+        auto area = getRowsViewportBounds().translated (0, -juce::roundToInt (scrollOffset));
+        area.removeFromTop (3);
         return area.removeFromTop (58 * index + 58).removeFromBottom (58).reduced (0, 4);
+    }
+
+    juce::Rectangle<int> getRowsViewportBounds() const
+    {
+        auto area = getLocalBounds().reduced (10, 9);
+        area.removeFromTop (30);
+        return area;
     }
 
     juce::Rectangle<int> getVolumeBounds (juce::Rectangle<int> row) const
@@ -1640,10 +2012,39 @@ private:
         return std::sqrt (juce::jlimit (0.0f, 1.0f, value * 5.0f));
     }
 
+    int getContentHeight() const
+    {
+        return state == nullptr ? 0 : 3 + static_cast<int> (state->lanes.size()) * 58;
+    }
+
+    void clampScroll()
+    {
+        const auto maxScroll = juce::jmax (0.0f, static_cast<float> (getContentHeight() - getRowsViewportBounds().getHeight()));
+        scrollOffset = juce::jlimit (0.0f, maxScroll, scrollOffset);
+    }
+
+    void drawScrollBar (juce::Graphics& g, juce::Rectangle<int> viewport) const
+    {
+        const auto contentHeight = getContentHeight();
+        const auto viewportHeight = viewport.getHeight();
+        if (contentHeight <= viewportHeight || viewportHeight <= 0)
+            return;
+
+        auto track = viewport.reduced (0, 6).removeFromRight (4).toFloat();
+        const auto thumbHeight = juce::jmax (22.0f, track.getHeight() * static_cast<float> (viewportHeight) / static_cast<float> (contentHeight));
+        const auto maxScroll = static_cast<float> (contentHeight - viewportHeight);
+        const auto thumbY = track.getY() + (track.getHeight() - thumbHeight) * (scrollOffset / juce::jmax (1.0f, maxScroll));
+        g.setColour (accentB().withAlpha (0.12f));
+        g.fillRoundedRectangle (track, 2.0f);
+        g.setColour (accentB().withAlpha (0.62f));
+        g.fillRoundedRectangle (track.withY (thumbY).withHeight (thumbHeight), 2.0f);
+    }
+
     State* state = nullptr;
     int selectedIndex = 0;
     int draggingVolumeIndex = -1;
     bool transportRunning = false;
+    float scrollOffset = 0.0f;
 };
 
 class PaneDivider final : public juce::Component
@@ -2020,6 +2421,8 @@ public:
         addAndMakeVisible (statusLabel);
         addAndMakeVisible (loadProjectButton);
         addAndMakeVisible (saveProjectButton);
+        addAndMakeVisible (undoButton);
+        addAndMakeVisible (redoButton);
         addAndMakeVisible (logButton);
         addAndMakeVisible (panicButton);
         addAndMakeVisible (topStateCountLabel);
@@ -2037,7 +2440,12 @@ public:
         addAndMakeVisible (graphBottomDivider);
         addAndMakeVisible (rulesTracksDivider);
         addAndMakeVisible (tracksCodeDivider);
+        addAndMakeVisible (rightInspectorDivider);
         addAndMakeVisible (stateTabs);
+        addAndMakeVisible (navigator);
+        addAndMakeVisible (stateInfoTitle);
+        addAndMakeVisible (nestedSectionTitle);
+        addAndMakeVisible (trackSectionTitle);
         addAndMakeVisible (breadcrumbLabel);
         addAndMakeVisible (stateSummaryLabel);
         addAndMakeVisible (stateTempoLabel);
@@ -2062,8 +2470,7 @@ public:
         addAndMakeVisible (codeStatsLabel);
         addAndMakeVisible (codeCheckLabel);
         addAndMakeVisible (checkCodeButton);
-        addAndMakeVisible (codeFontDownButton);
-        addAndMakeVisible (codeFontUpButton);
+        addAndMakeVisible (codeFontSizeEditor);
         addAndMakeVisible (tidyCodeButton);
         addAndMakeVisible (expandCodeButton);
         addAndMakeVisible (scriptEditor);
@@ -2072,10 +2479,8 @@ public:
         addAndMakeVisible (moveLaneUpButton);
         addAndMakeVisible (moveLaneDownButton);
         addAndMakeVisible (addChildMachineButton);
-        addAndMakeVisible (enterChildMachineButton);
-        addAndMakeVisible (exitChildMachineButton);
+        addAndMakeVisible (removeChildMachineButton);
         addAndMakeVisible (playButton);
-        addAndMakeVisible (stopButton);
 
         title.setText ("Markov FSM", juce::dontSendNotification);
         title.setFont (juce::FontOptions (24.0f, juce::Font::bold));
@@ -2088,6 +2493,21 @@ public:
         stateSummaryLabel.setFont (juce::FontOptions (13.0f, juce::Font::bold));
         stateSummaryLabel.setColour (juce::Label::textColourId, ink());
         stateSummaryLabel.setJustificationType (juce::Justification::centredLeft);
+
+        stateInfoTitle.setText ("State", juce::dontSendNotification);
+        nestedSectionTitle.setText ("Nested FSM", juce::dontSendNotification);
+        trackSectionTitle.setText ("Tracks", juce::dontSendNotification);
+        for (auto* sectionTitle : { &stateInfoTitle, &nestedSectionTitle, &trackSectionTitle })
+        {
+            sectionTitle->setFont (juce::FontOptions (11.5f, juce::Font::bold));
+            sectionTitle->setColour (juce::Label::textColourId, mutedInk().withAlpha (0.82f));
+            sectionTitle->setJustificationType (juce::Justification::centredLeft);
+        }
+
+        navigator.onStateChosen = [this] (MachineModel* targetMachine, int stateIndex)
+        {
+            navigateToMachineState (targetMachine, stateIndex);
+        };
 
         stateTempoLabel.setText ("Tempo", juce::dontSendNotification);
         stateTempoLabel.setFont (juce::FontOptions (12.0f, juce::Font::bold));
@@ -2178,7 +2598,7 @@ public:
         trackNameEditor.onTextChange = [this]
         {
             currentInspectorMachine().selectedLaneRef().name = trackNameEditor.getText().trim();
-            markMachineDirty();
+            markMachineDirty (UndoGroup::text);
             trackList.repaint();
         };
 
@@ -2214,6 +2634,17 @@ public:
             dividerDragStartTracksWidth = tracksPaneWidth;
         };
 
+        rightInspectorDivider.onDragged = [this] (int delta)
+        {
+            rightStatePaneHeight = dividerDragStartRightStateHeight + delta;
+            resized();
+        };
+        rightInspectorDivider.onDragStarted = [this]
+        {
+            rightInspectorUserSized = true;
+            dividerDragStartRightStateHeight = rightStatePaneHeight;
+        };
+
         graphBottomDivider.onDragged = [this] (int delta)
         {
             bottomPaneHeight = dividerDragStartBottomHeight - delta;
@@ -2233,6 +2664,8 @@ public:
         logButton.setButtonText ("Log");
         loadProjectButton.setButtonText ("Load");
         saveProjectButton.setButtonText ("Save");
+        undoButton.setButtonText ("Undo");
+        redoButton.setButtonText ("Redo");
         panicButton.setButtonText ("Panic");
         panicButton.setColour (juce::TextButton::buttonColourId, accentC().darker (0.45f));
 
@@ -2266,6 +2699,7 @@ public:
         {
             addListener (this, "/markov/state");
             addListener (this, "/markov/meter");
+            addListener (this, "/markov/pulse");
         }
         else
             appendLog ("Could not bind visual state OSC port 57142");
@@ -2291,7 +2725,7 @@ public:
         topStateCountEditor.onReturnKey = [this] { commitTopLevelStateCountEditor(); };
         topStateCountEditor.onFocusLost = [this] { commitTopLevelStateCountEditor(); };
 
-        runButton.setButtonText ("Run FSM");
+        runButton.setButtonText ("Run");
         stepButton.setButtonText ("Step");
         stopAllButton.setButtonText ("Stop all");
         rateSlider.setRange (0.2, 4.0, 0.1);
@@ -2319,7 +2753,8 @@ public:
                 stopTransport();
                 host.pauseMachine();
                 host.stopAll (machine);
-                runButton.setButtonText ("Run FSM");
+                graph.clearTimingPulse();
+                runButton.setButtonText ("Run");
             }
         };
 
@@ -2332,9 +2767,10 @@ public:
         {
             fsmRunning = false;
             stopTransport();
-            runButton.setButtonText ("Run FSM");
+            runButton.setButtonText ("Run");
             host.pauseMachine();
             host.stopAll (machine);
+            graph.clearTimingPulse();
             refreshControls();
         };
 
@@ -2343,8 +2779,9 @@ public:
             fsmRunning = false;
             stopTransport();
             host.pauseMachine();
-            runButton.setButtonText ("Run FSM");
+            runButton.setButtonText ("Run");
             host.panic (machine);
+            graph.clearTimingPulse();
             refreshControls();
         };
 
@@ -2363,6 +2800,16 @@ public:
         saveProjectButton.onClick = [this]
         {
             chooseProjectToSave();
+        };
+
+        undoButton.onClick = [this]
+        {
+            undoProjectEdit();
+        };
+
+        redoButton.onClick = [this]
+        {
+            redoProjectEdit();
         };
 
         rateSlider.onValueChange = [this]
@@ -2444,21 +2891,13 @@ public:
         scriptEditor.setColour (juce::CodeEditorComponent::lineNumberTextId, mutedInk().withAlpha (0.52f));
         scriptEditor.setColourScheme (scTokeniser.getDefaultColourScheme());
 
-        codeFontDownButton.setButtonText ("A-");
-        codeFontUpButton.setButtonText ("A+");
         tidyCodeButton.setButtonText ("Tidy");
         checkCodeButton.setButtonText ("Check");
         expandCodeButton.setButtonText ("Expand");
-        codeFontDownButton.onClick = [this]
-        {
-            codeFontSize = juce::jlimit (11.0f, 20.0f, codeFontSize - 1.0f);
-            updateCodeEditorFont();
-        };
-        codeFontUpButton.onClick = [this]
-        {
-            codeFontSize = juce::jlimit (11.0f, 20.0f, codeFontSize + 1.0f);
-            updateCodeEditorFont();
-        };
+        configureSmallNumberEditor (codeFontSizeEditor, 2, "0123456789");
+        codeFontSizeEditor.setText (juce::String (juce::roundToInt (codeFontSize)), false);
+        codeFontSizeEditor.onReturnKey = [this] { commitCodeFontSizeEditor(); };
+        codeFontSizeEditor.onFocusLost = [this] { commitCodeFontSizeEditor(); };
         tidyCodeButton.onClick = [this]
         {
             tidySelectedLaneScript();
@@ -2480,10 +2919,8 @@ public:
         moveLaneUpButton.setButtonText ("Up");
         moveLaneDownButton.setButtonText ("Down");
         addChildMachineButton.setButtonText ("+ FSM");
-        enterChildMachineButton.setButtonText ("Enter");
-        exitChildMachineButton.setButtonText ("Back");
+        removeChildMachineButton.setButtonText ("- FSM");
         playButton.setButtonText ("Play");
-        stopButton.setButtonText ("Stop");
 
         addLaneButton.onClick = [this]
         {
@@ -2521,23 +2958,20 @@ public:
             refreshControls();
         };
 
-        enterChildMachineButton.onClick = [this]
+        removeChildMachineButton.onClick = [this]
         {
             auto& inspected = currentInspectorMachine();
             if (auto* child = inspected.childMachine (inspected.selectedState))
             {
-                machineStack.push_back (&inspected);
-                setActiveMachine (*child);
-            }
-        };
-
-        exitChildMachineButton.onClick = [this]
-        {
-            if (! machineStack.empty())
-            {
-                auto* parent = machineStack.back();
-                machineStack.pop_back();
-                setActiveMachine (*parent);
+                stopMachineRecursive (*child);
+                inspected.removeChildFromSelectedState();
+                inspectedMachine = &inspected;
+                activeMachine = &inspected;
+                graph.setMachine (inspected);
+                graph.setInspectedMachine (&inspected);
+                rules.setMachine (inspected);
+                markMachineDirty();
+                refreshControls();
             }
         };
 
@@ -2546,7 +2980,11 @@ public:
             auto& inspected = currentInspectorMachine();
             auto& state = inspected.state (inspected.selectedState);
             auto& lane = inspected.selectedLaneRef();
-            if (shouldPlayLane (state, lane))
+            if (lane.playing)
+            {
+                host.stop (lane);
+            }
+            else if (shouldPlayLane (state, lane))
             {
                 primeMeterForLane (lane);
                 host.play (lane, getSclangPathOverride());
@@ -2555,12 +2993,6 @@ public:
             {
                 host.stop (lane);
             }
-            refreshControls();
-        };
-
-        stopButton.onClick = [this]
-        {
-            host.stop (currentInspectorMachine().selectedLaneRef());
             refreshControls();
         };
 
@@ -2623,7 +3055,7 @@ public:
                 fsmRunning = false;
                 stopTransport();
                 host.stopAll (machine);
-                runButton.setButtonText ("Run FSM");
+                runButton.setButtonText ("Run");
 
                 child->setStateCount (newCount);
                 child->regenerateRingRules();
@@ -2641,7 +3073,7 @@ public:
                     fsmRunning = false;
                     stopTransport();
                     host.stopAll (machine);
-                    runButton.setButtonText ("Run FSM");
+                    runButton.setButtonText ("Run");
 
                     grandchild->setStateCount (newCount);
                     grandchild->regenerateRingRules();
@@ -2660,6 +3092,8 @@ public:
 
         refreshControls();
         restoreLastProject();
+        resetUndoHistory();
+        setWantsKeyboardFocus (true);
         startTimer (1000);
         juce::Timer::callAfterDelay (350, [safeThis = juce::Component::SafePointer<MainComponent> (this)]
         {
@@ -2704,6 +3138,8 @@ public:
         graphLayoutButton.setBounds (header.removeFromRight (68).reduced (4, 8));
         graphFitButton.setBounds (header.removeFromRight (46).reduced (4, 8));
         logButton.setBounds (header.removeFromRight (56).reduced (4, 8));
+        redoButton.setBounds (header.removeFromRight (60).reduced (4, 8));
+        undoButton.setBounds (header.removeFromRight (62).reduced (4, 8));
         saveProjectButton.setBounds (header.removeFromRight (62).reduced (4, 8));
         loadProjectButton.setBounds (header.removeFromRight (62).reduced (4, 8));
         panicButton.setBounds (header.removeFromRight (74).reduced (4, 8));
@@ -2759,10 +3195,27 @@ public:
         rules.setBounds (rulesPane);
         rulesTracksDivider.setBounds (dividerA);
 
-        auto trackPaneInner = tracksPane.reduced (10, 8);
-        breadcrumbLabel.setBounds (trackPaneInner.removeFromTop (22).reduced (2, 0));
-        stateSummaryLabel.setBounds (trackPaneInner.removeFromTop (28).reduced (2, 0));
-        auto stateTimingRow = trackPaneInner.removeFromTop (34);
+        auto inspectorArea = tracksPane.reduced (10, 8);
+        const auto rightDividerHeight = 8;
+        const auto minStatePaneHeight = 232;
+        const auto minTrackPaneHeight = 220;
+        const auto maxStatePaneHeight = juce::jmax (minStatePaneHeight,
+                                                    inspectorArea.getHeight() - minTrackPaneHeight - rightDividerHeight);
+        if (! rightInspectorUserSized)
+            rightStatePaneHeight = juce::jlimit (260, 340, juce::roundToInt (static_cast<float> (inspectorArea.getHeight()) * 0.44f));
+        rightStatePaneHeight = juce::jlimit (minStatePaneHeight, maxStatePaneHeight, rightStatePaneHeight);
+
+        auto statePane = inspectorArea.removeFromTop (rightStatePaneHeight);
+        rightInspectorDivider.setBounds (inspectorArea.removeFromTop (rightDividerHeight).reduced (0, 1));
+        auto tracksPaneLower = inspectorArea;
+
+        auto statePaneInner = statePane.reduced (0, 2);
+        breadcrumbLabel.setBounds (statePaneInner.removeFromTop (22).reduced (2, 0));
+        navigator.setBounds (statePaneInner.removeFromTop (juce::jlimit (94, 138, statePaneInner.getHeight() / 3)).reduced (0, 5));
+        statePaneInner.removeFromTop (2);
+        stateInfoTitle.setBounds (statePaneInner.removeFromTop (18).reduced (2, 0));
+        stateSummaryLabel.setBounds (statePaneInner.removeFromTop (24).reduced (2, 0));
+        auto stateTimingRow = statePaneInner.removeFromTop (34);
         stateTempoLabel.setBounds (stateTimingRow.removeFromLeft (54).reduced (2, 4));
         stateTempoEditor.setBounds (stateTimingRow.removeFromLeft (66).reduced (2, 4));
         stateTimingRow.removeFromLeft (8);
@@ -2770,16 +3223,21 @@ public:
         stateMeterBeatsEditor.setBounds (stateTimingRow.removeFromLeft (36).reduced (2, 4));
         stateMeterSlashLabel.setBounds (stateTimingRow.removeFromLeft (14).reduced (0, 4));
         stateMeterUnitEditor.setBounds (stateTimingRow.removeFromLeft (36).reduced (2, 4));
-        trackPaneInner.removeFromTop (4);
-        auto timingRow = trackPaneInner.removeFromTop (34);
-        nestedTimingLabel.setBounds (timingRow.removeFromLeft (96).reduced (2, 4));
-        nestedModeBox.setBounds (timingRow.reduced (2, 4));
-        auto divisionRow = trackPaneInner.removeFromTop (32);
+        statePaneInner.removeFromTop (6);
+        auto nestedHeaderRow = statePaneInner.removeFromTop (32);
+        nestedSectionTitle.setBounds (nestedHeaderRow.removeFromLeft (104).reduced (2, 4));
+        removeChildMachineButton.setBounds (nestedHeaderRow.removeFromRight (74).reduced (2, 4));
+        addChildMachineButton.setBounds (nestedHeaderRow.removeFromRight (74).reduced (2, 4));
+        auto nestedModeRow = statePaneInner.removeFromTop (32);
+        nestedTimingLabel.setBounds (nestedModeRow.removeFromLeft (96).reduced (2, 4));
+        nestedModeBox.setBounds (nestedModeRow.reduced (2, 4));
+        auto divisionRow = statePaneInner.removeFromTop (32);
         nestedDivisionLabel.setBounds (divisionRow.removeFromLeft (76).reduced (2, 4));
         nestedDivisionMinus.setBounds (divisionRow.removeFromLeft (28).reduced (2, 4));
         nestedDivisionEditor.setBounds (divisionRow.removeFromLeft (42).reduced (2, 4));
         nestedDivisionPlus.setBounds (divisionRow.removeFromLeft (28).reduced (2, 4));
-        trackPaneInner.removeFromTop (8);
+        auto trackPaneInner = tracksPaneLower.reduced (0, 2);
+        trackSectionTitle.setBounds (trackPaneInner.removeFromTop (18).reduced (2, 0));
         auto inspectorModeRow = trackPaneInner.removeFromTop (34);
         tracksModeButton.setBounds (inspectorModeRow.removeFromLeft (88).reduced (0, 3));
         mixerModeButton.setBounds (inspectorModeRow.removeFromLeft (88).reduced (6, 3));
@@ -2824,17 +3282,12 @@ public:
         auto codeHeader = codePaneInner.removeFromTop (34);
         codePaneTitle.setBounds (codeHeader.removeFromLeft (74).reduced (3));
         codeStatsLabel.setBounds (codeHeader.removeFromRight (132).reduced (3));
-        codeFontUpButton.setBounds (codeHeader.removeFromRight (42).reduced (3));
-        codeFontDownButton.setBounds (codeHeader.removeFromRight (42).reduced (3));
+        codeFontSizeEditor.setBounds (codeHeader.removeFromRight (50).reduced (3));
         tidyCodeButton.setBounds (codeHeader.removeFromRight (58).reduced (3));
         expandCodeButton.setBounds (codeHeader.removeFromRight (72).reduced (3));
-        codeCheckLabel.setBounds (codeHeader.removeFromRight (codeExpanded ? 280 : 170).reduced (3));
-        addChildMachineButton.setBounds (codeHeader.removeFromLeft (64).reduced (3));
-        enterChildMachineButton.setBounds (codeHeader.removeFromLeft (58).reduced (3));
-        exitChildMachineButton.setBounds (codeHeader.removeFromLeft (54).reduced (3));
-        checkCodeButton.setBounds (codeHeader.removeFromLeft (66).reduced (3));
-        playButton.setBounds (codeHeader.removeFromLeft (64).reduced (3));
-        stopButton.setBounds (codeHeader.removeFromLeft (64).reduced (3));
+        playButton.setBounds (codeHeader.removeFromRight (76).reduced (3));
+        checkCodeButton.setBounds (codeHeader.removeFromRight (66).reduced (3));
+        codeCheckLabel.setBounds (codeHeader.reduced (3));
         scriptEditor.setBounds (codePaneInner.reduced (0, 6));
 
         stateTabs.setBounds (area.removeFromTop (36));
@@ -2843,6 +3296,24 @@ public:
             logView.setBounds (graphArea.removeFromBottom (142).reduced (0, 8));
 
         graph.setBounds (graphArea);
+    }
+
+    bool keyPressed (const juce::KeyPress& key) override
+    {
+        const auto mods = key.getModifiers();
+        const auto keyCode = key.getKeyCode();
+
+        if (mods.isCommandDown() && (keyCode == 'z' || keyCode == 'Z'))
+        {
+            if (mods.isShiftDown())
+                redoProjectEdit();
+            else
+                undoProjectEdit();
+
+            return true;
+        }
+
+        return false;
     }
 
 private:
@@ -2863,10 +3334,26 @@ private:
         scriptEditor.setFont (juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(), codeFontSize, juce::Font::plain)));
     }
 
+    void commitCodeFontSizeEditor()
+    {
+        const auto requestedSize = codeFontSizeEditor.getText().getIntValue();
+        codeFontSize = static_cast<float> (juce::jlimit (11, 24, requestedSize <= 0 ? juce::roundToInt (codeFontSize) : requestedSize));
+        codeFontSizeEditor.setText (juce::String (juce::roundToInt (codeFontSize)), false);
+        updateCodeEditorFont();
+        scriptEditor.grabKeyboardFocus();
+    }
+
     enum class InspectorMode
     {
         tracks,
         mixer
+    };
+
+    enum class UndoGroup
+    {
+        structural,
+        text,
+        continuous
     };
 
     struct LaneMeterState
@@ -3055,6 +3542,12 @@ private:
             return;
         }
 
+        if (address == "/markov/pulse")
+        {
+            handlePulseMessage (message);
+            return;
+        }
+
         if (address != "/markov/state")
             return;
 
@@ -3072,6 +3565,21 @@ private:
             stateIndex = message[1].getString().getIntValue();
 
         applySchedulerState (machineId, stateIndex);
+    }
+
+    void handlePulseMessage (const juce::OSCMessage& message)
+    {
+        if (message.size() < 5 || ! message[0].isString())
+            return;
+
+        const auto machineId = message[0].getString();
+        const auto stateIndex = message[1].isInt32() ? message[1].getInt32() : static_cast<int> (getOscFloat (message[1]));
+        const auto phase = getOscFloat (message[2]);
+        const auto beatIndex = message[3].isInt32() ? message[3].getInt32() : static_cast<int> (getOscFloat (message[3]));
+        const auto beatCount = message[4].isInt32() ? message[4].getInt32() : static_cast<int> (getOscFloat (message[4]));
+
+        graph.setTimingPulse (machineId, stateIndex, phase, beatIndex, beatCount);
+        updateTransitionPreview();
     }
 
     void handleMeterMessage (const juce::OSCMessage& message)
@@ -3275,6 +3783,162 @@ private:
         return object;
     }
 
+    juce::String makeProjectSnapshotString() const
+    {
+        return juce::JSON::toString (makeProjectVar(), false);
+    }
+
+    void updateUndoRedoButtons()
+    {
+        undoButton.setEnabled (! undoSnapshots.empty());
+        redoButton.setEnabled (! redoSnapshots.empty());
+    }
+
+    void resetUndoHistory()
+    {
+        undoSnapshots.clear();
+        redoSnapshots.clear();
+        lastProjectSnapshot = makeProjectSnapshotString();
+        lastUndoGroup = UndoGroup::structural;
+        lastUndoSnapshotMs = juce::Time::getMillisecondCounterHiRes();
+        updateUndoRedoButtons();
+    }
+
+    void recordUndoSnapshotAfterMutation (UndoGroup group)
+    {
+        if (suppressUndoCapture)
+            return;
+
+        const auto currentSnapshot = makeProjectSnapshotString();
+        const auto now = juce::Time::getMillisecondCounterHiRes();
+        if (lastProjectSnapshot.isEmpty())
+        {
+            lastProjectSnapshot = currentSnapshot;
+            lastUndoGroup = group;
+            lastUndoSnapshotMs = now;
+            updateUndoRedoButtons();
+            return;
+        }
+
+        if (currentSnapshot == lastProjectSnapshot)
+            return;
+
+        const auto coalesceWindowMs = group == UndoGroup::text ? 1400.0 : 700.0;
+        const auto canCoalesce = group != UndoGroup::structural
+                              && group == lastUndoGroup
+                              && now - lastUndoSnapshotMs < coalesceWindowMs
+                              && ! undoSnapshots.empty();
+
+        if (canCoalesce)
+        {
+            lastProjectSnapshot = currentSnapshot;
+            lastUndoSnapshotMs = now;
+            redoSnapshots.clear();
+            updateUndoRedoButtons();
+            return;
+        }
+
+        undoSnapshots.push_back (lastProjectSnapshot);
+        constexpr size_t maxUndoSnapshots = 64;
+        if (undoSnapshots.size() > maxUndoSnapshots)
+            undoSnapshots.erase (undoSnapshots.begin());
+
+        redoSnapshots.clear();
+        lastProjectSnapshot = currentSnapshot;
+        lastUndoGroup = group;
+        lastUndoSnapshotMs = now;
+        updateUndoRedoButtons();
+    }
+
+    bool applyProjectSnapshotString (const juce::String& snapshot)
+    {
+        auto parsed = juce::JSON::parse (snapshot);
+        if (! parsed.isObject())
+            return false;
+
+        auto machineVar = parsed.getProperty ("machine", {});
+        if (! machineVar.isObject())
+            return false;
+
+        const juce::ScopedValueSetter<bool> guard (suppressUndoCapture, true);
+
+        fsmRunning = false;
+        stopTransport();
+        host.pauseMachine();
+        host.stopAll (machine);
+        runButton.setButtonText ("Run");
+
+        if (! machineFromProjectVar (machine, machineVar))
+            return false;
+
+        const auto rate = static_cast<double> (parsed.getProperty ("rate", rateSlider.getValue()));
+        rateSlider.setValue (juce::jlimit (0.2, 4.0, rate), juce::dontSendNotification);
+        machineStack.clear();
+        activeMachine = &machine;
+        inspectedMachine = &machine;
+        graph.setMachine (machine);
+        graph.setInspectedMachine (&machine);
+        rules.setMachine (machine);
+        laneMeters.clear();
+        machinePrepared = false;
+        topStateCountEditor.setText (juce::String (machine.getStateCount()), false);
+        refreshControls();
+        startPrepareJob (false);
+        return true;
+    }
+
+    void undoProjectEdit()
+    {
+        if (undoSnapshots.empty())
+            return;
+
+        const auto currentSnapshot = lastProjectSnapshot.isNotEmpty() ? lastProjectSnapshot : makeProjectSnapshotString();
+        const auto targetSnapshot = undoSnapshots.back();
+        undoSnapshots.pop_back();
+
+        if (! applyProjectSnapshotString (targetSnapshot))
+        {
+            undoSnapshots.push_back (targetSnapshot);
+            updateUndoRedoButtons();
+            statusLabel.setText ("Undo failed", juce::dontSendNotification);
+            return;
+        }
+
+        redoSnapshots.push_back (currentSnapshot);
+        lastProjectSnapshot = targetSnapshot;
+        dirtyProject = true;
+        lastDirtyMs = juce::Time::getMillisecondCounterHiRes();
+        saveProjectButton.setButtonText ("Save*");
+        statusLabel.setText ("Undone", juce::dontSendNotification);
+        updateUndoRedoButtons();
+    }
+
+    void redoProjectEdit()
+    {
+        if (redoSnapshots.empty())
+            return;
+
+        const auto currentSnapshot = lastProjectSnapshot.isNotEmpty() ? lastProjectSnapshot : makeProjectSnapshotString();
+        const auto targetSnapshot = redoSnapshots.back();
+        redoSnapshots.pop_back();
+
+        if (! applyProjectSnapshotString (targetSnapshot))
+        {
+            redoSnapshots.push_back (targetSnapshot);
+            updateUndoRedoButtons();
+            statusLabel.setText ("Redo failed", juce::dontSendNotification);
+            return;
+        }
+
+        undoSnapshots.push_back (currentSnapshot);
+        lastProjectSnapshot = targetSnapshot;
+        dirtyProject = true;
+        lastDirtyMs = juce::Time::getMillisecondCounterHiRes();
+        saveProjectButton.setButtonText ("Save*");
+        statusLabel.setText ("Redone", juce::dontSendNotification);
+        updateUndoRedoButtons();
+    }
+
     bool laneFromProjectVar (Lane& lane, const juce::var& value, const MachineModel& model, int stateIndex, int laneIndex) const
     {
         if (! value.isObject())
@@ -3384,7 +4048,7 @@ private:
         stopTransport();
         host.pauseMachine();
         host.stopAll (machine);
-        runButton.setButtonText ("Run FSM");
+        runButton.setButtonText ("Run");
 
         if (! machineFromProjectVar (machine, machineVar))
             return false;
@@ -3411,6 +4075,7 @@ private:
             startPrepareJob (false);
         dirtyProject = false;
         saveProjectButton.setButtonText ("Save");
+        resetUndoHistory();
         return true;
     }
 
@@ -3427,6 +4092,7 @@ private:
         addRecentProject (file);
         dirtyProject = false;
         saveProjectButton.setButtonText ("Save");
+        lastProjectSnapshot = makeProjectSnapshotString();
         saveAppState();
         return true;
     }
@@ -3516,7 +4182,52 @@ private:
         machine.selectedState = stateIndex;
         machine.selectedLane = juce::jlimit (0, machine.getLaneCount (stateIndex) - 1, 0);
         primeMetersForActiveState (machine);
+        updateTransitionPreview();
         refreshControls();
+    }
+
+    std::pair<int, float> mostLikelyNextState (const MachineModel& model) const
+    {
+        const auto selected = model.selectedState;
+        auto total = 0.0f;
+        auto bestWeight = -1.0f;
+        auto bestState = -1;
+
+        for (const auto& rule : model.rules)
+        {
+            if (rule.from != selected || rule.weight <= 0.0f)
+                continue;
+
+            total += rule.weight;
+            if (rule.to != selected && rule.weight > bestWeight)
+            {
+                bestWeight = rule.weight;
+                bestState = rule.to;
+            }
+        }
+
+        if (bestState < 0)
+        {
+            for (const auto& rule : model.rules)
+            {
+                if (rule.from == selected && rule.weight > bestWeight)
+                {
+                    bestWeight = rule.weight;
+                    bestState = rule.to;
+                }
+            }
+        }
+
+        if (bestState < 0 || total <= 0.0f)
+            return { -1, 0.0f };
+
+        return { bestState, bestWeight / total };
+    }
+
+    void updateTransitionPreview()
+    {
+        const auto [stateIndex, probability] = mostLikelyNextState (currentMachine());
+        graph.setTransitionPreview (stateIndex, probability);
     }
 
     int extractErrorLineNumber (const juce::String& text) const
@@ -3596,7 +4307,7 @@ private:
         scriptEditor.loadContent (tidied);
         loadingCodeDocument = false;
         updateCodeStats();
-        markMachineDirty();
+        markMachineDirty (UndoGroup::text);
     }
 
     void codeDocumentTextInserted (const juce::String&, int) override
@@ -3619,7 +4330,7 @@ private:
         if (pendingCheckId.isEmpty())
             setCodeCheckStatus ("Modified", mutedInk());
         updateCodeStats();
-        markMachineDirty();
+        markMachineDirty (UndoGroup::text);
     }
 
     MachineModel& currentMachine() const
@@ -3630,6 +4341,45 @@ private:
     MachineModel& currentInspectorMachine() const
     {
         return inspectedMachine != nullptr ? *inspectedMachine : *activeMachine;
+    }
+
+    bool buildMachinePath (MachineModel* model, MachineModel* target, std::vector<MachineModel*>& parents)
+    {
+        if (model == nullptr)
+            return false;
+
+        if (model == target)
+            return true;
+
+        for (int i = 0; i < model->getStateCount(); ++i)
+        {
+            if (auto* child = model->childMachine (i))
+            {
+                parents.push_back (model);
+                if (buildMachinePath (child, target, parents))
+                    return true;
+                parents.pop_back();
+            }
+        }
+
+        return false;
+    }
+
+    void navigateToMachineState (MachineModel* targetMachine, int stateIndex)
+    {
+        if (targetMachine == nullptr)
+            return;
+
+        targetMachine->selectedState = juce::jlimit (0, targetMachine->getStateCount() - 1, stateIndex);
+        targetMachine->selectedLane = juce::jlimit (0, targetMachine->getLaneCount (targetMachine->selectedState) - 1,
+                                                   targetMachine->selectedLane);
+
+        std::vector<MachineModel*> parents;
+        if (! buildMachinePath (&machine, targetMachine, parents))
+            return;
+
+        machineStack = parents;
+        setActiveMachine (*targetMachine);
     }
 
     MachineModel* selectedNestedMachine() const
@@ -3747,7 +4497,7 @@ private:
         fsmRunning = false;
         stopTransport();
         host.stopAll (machine);
-        runButton.setButtonText ("Run FSM");
+        runButton.setButtonText ("Run");
 
         machineStack.clear();
         activeMachine = &machine;
@@ -3800,12 +4550,14 @@ private:
         }
     }
 
-    void markMachineDirty()
+    void markMachineDirty (UndoGroup group = UndoGroup::structural)
     {
+        recordUndoSnapshotAfterMutation (group);
         machinePrepared = false;
         dirtyProject = true;
         lastDirtyMs = juce::Time::getMillisecondCounterHiRes();
         saveProjectButton.setButtonText ("Save*");
+        statusLabel.setText ("Edited", juce::dontSendNotification);
     }
 
     void startPreparedRun()
@@ -3824,7 +4576,7 @@ private:
         if (audioJobRunning.exchange (true))
             return;
 
-        runButton.setButtonText (startAfterPrepare ? "Starting..." : "Run FSM");
+        runButton.setButtonText (startAfterPrepare ? "Starting..." : "Run");
         statusLabel.setText ("Booting audio", juce::dontSendNotification);
 
         auto lanes = makeLaneSnapshots();
@@ -3867,13 +4619,13 @@ private:
                     }
                     else
                     {
-                        safeThis->runButton.setButtonText ("Run FSM");
+                        safeThis->runButton.setButtonText ("Run");
                     }
                 }
                 else
                 {
                     safeThis->fsmRunning = false;
-                    safeThis->runButton.setButtonText ("Run FSM");
+                    safeThis->runButton.setButtonText ("Run");
                 }
 
                 safeThis->refreshControls();
@@ -4284,7 +5036,7 @@ private:
         lane.enabled = ! lane.enabled;
         if (! lane.enabled)
             host.stop (lane);
-        markMachineDirty();
+        markMachineDirty (UndoGroup::continuous);
         applyAllMixToHost();
         refreshControls();
     }
@@ -4361,16 +5113,19 @@ private:
             nestedDivisionEditor.setText ("-", false);
         }
         topStateCountEditor.setText (juce::String (machine.getStateCount()), false);
-        playButton.setColour (juce::TextButton::buttonColourId, currentInspectorMachine().selectedLaneRef().playing ? accentA().darker (0.2f) : accentB().darker (0.35f));
+        const auto selectedLanePlaying = currentInspectorMachine().selectedLaneRef().playing;
+        playButton.setButtonText (selectedLanePlaying ? "Stop" : "Play");
+        playButton.setColour (juce::TextButton::buttonColourId, selectedLanePlaying ? accentC().darker (0.25f) : accentB().darker (0.35f));
         moveLaneUpButton.setEnabled (currentInspectorMachine().selectedLane > 0);
         moveLaneDownButton.setEnabled (currentInspectorMachine().selectedLane < currentInspectorMachine().getLaneCount (currentInspectorMachine().selectedState) - 1);
         const auto hasChild = currentInspectorMachine().hasChildMachine (currentInspectorMachine().selectedState);
         addChildMachineButton.setEnabled (! hasChild);
-        enterChildMachineButton.setEnabled (hasChild);
-        exitChildMachineButton.setEnabled (! machineStack.empty());
+        removeChildMachineButton.setEnabled (hasChild);
+        navigator.setMachines (machine, activeMachine, inspectedMachine);
         graph.repaint();
         rules.repaint();
         graph.setInspectedMachine (&currentInspectorMachine());
+        updateTransitionPreview();
     }
 
     void refreshStateTabs()
@@ -4402,11 +5157,14 @@ private:
     PaneDivider graphBottomDivider { PaneDivider::Orientation::horizontal };
     PaneDivider rulesTracksDivider;
     PaneDivider tracksCodeDivider;
+    PaneDivider rightInspectorDivider { PaneDivider::Orientation::horizontal };
 
     juce::Label title;
     ClickableLabel statusLabel;
     juce::TextButton loadProjectButton;
     juce::TextButton saveProjectButton;
+    juce::TextButton undoButton;
+    juce::TextButton redoButton;
     juce::TextButton logButton;
     juce::TextButton panicButton;
     juce::Label topStateCountLabel;
@@ -4418,6 +5176,10 @@ private:
     juce::TextButton stopAllButton;
     juce::Slider rateSlider;
     PillBar stateTabs;
+    FsmNavigatorComponent navigator;
+    juce::Label stateInfoTitle;
+    juce::Label nestedSectionTitle;
+    juce::Label trackSectionTitle;
     juce::Label breadcrumbLabel;
     juce::Label stateSummaryLabel;
     juce::Label stateTempoLabel;
@@ -4442,8 +5204,7 @@ private:
     juce::Label codeStatsLabel;
     juce::Label codeCheckLabel;
     juce::TextButton checkCodeButton;
-    juce::TextButton codeFontDownButton;
-    juce::TextButton codeFontUpButton;
+    juce::TextEditor codeFontSizeEditor;
     juce::TextButton tidyCodeButton;
     juce::TextButton expandCodeButton;
     SuperColliderTokeniser scTokeniser;
@@ -4454,10 +5215,8 @@ private:
     juce::TextButton moveLaneUpButton;
     juce::TextButton moveLaneDownButton;
     juce::TextButton addChildMachineButton;
-    juce::TextButton enterChildMachineButton;
-    juce::TextButton exitChildMachineButton;
+    juce::TextButton removeChildMachineButton;
     juce::TextButton playButton;
-    juce::TextButton stopButton;
     juce::TextEditor logView;
     juce::String scLog;
     bool logVisible = false;
@@ -4471,9 +5230,12 @@ private:
     int dividerDragStartRulesWidth = 500;
     int dividerDragStartTracksWidth = 210;
     int dividerDragStartBottomHeight = 250;
+    int rightStatePaneHeight = 300;
+    int dividerDragStartRightStateHeight = 300;
     bool rulesPaneUserSized = false;
     bool tracksPaneUserSized = false;
     bool bottomPaneUserSized = false;
+    bool rightInspectorUserSized = false;
     std::atomic<bool> audioJobRunning { false };
     std::atomic<bool> transportShouldRun { false };
     std::atomic<int> transportIntervalMs { 2000 };
@@ -4491,6 +5253,12 @@ private:
     juce::StringArray recentProjects;
     bool dirtyProject = false;
     bool loadingProjectInternally = false;
+    bool suppressUndoCapture = false;
+    juce::String lastProjectSnapshot;
+    std::vector<juce::String> undoSnapshots;
+    std::vector<juce::String> redoSnapshots;
+    UndoGroup lastUndoGroup = UndoGroup::structural;
+    double lastUndoSnapshotMs = 0.0;
     double lastDirtyMs = 0.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
