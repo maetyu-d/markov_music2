@@ -19,19 +19,27 @@ juce::Colour mutedInk() { return juce::Colour (0xffaeb5bd); }
 juce::Colour accentA() { return juce::Colour (0xffffc857); }
 juce::Colour accentB() { return juce::Colour (0xff52d1dc); }
 juce::Colour accentC() { return juce::Colour (0xfff76f8e); }
-juce::Colour selectedFill() { return juce::Colour (0xff3a3320); }
 juce::Colour inspectedFill() { return juce::Colour (0xff1c3139); }
-juce::Colour selectedRow() { return juce::Colour (0xff34313a); }
 
 juce::Colour paletteColour (int index)
 {
     static constexpr juce::uint32 colours[] =
     {
-        0xff52d1dc, 0xffffc857, 0xfff76f8e, 0xff7bd88f,
-        0xffb48cff, 0xffff9f68, 0xff64b5f6, 0xfff06292
+        0xffffc857, 0xff52d1dc, 0xff7bd88f, 0xffff9f68,
+        0xfff76f8e, 0xff64b5f6, 0xfffff06a, 0xff5ee6a8
     };
 
     return juce::Colour (colours[static_cast<size_t> (index) % std::size (colours)]);
+}
+
+juce::Colour graphColour (int index, int offset = 0)
+{
+    return paletteColour (index + offset);
+}
+
+juce::Colour transitionColourFor (int index)
+{
+    return graphColour (index).interpolatedWith (mutedInk(), 0.34f);
 }
 } // namespace
 
@@ -484,12 +492,21 @@ private:
             curve.startNewSubPath (from);
             curve.quadraticTo (control, to);
 
-            g.setColour (accentB().withAlpha (0.22f + juce::jlimit (0.0f, 0.4f, rule.weight * 0.08f)));
-            g.strokePath (curve, juce::PathStrokeType (2.0f + rule.weight));
+            const auto fromSelected = rule.from == machine->selectedState;
+            const auto toPreviewed = rule.to == previewStateIndex;
+            const auto lineAlpha = (fromSelected || toPreviewed) ? 0.50f : 0.22f;
+            const auto lineWidth = (fromSelected || toPreviewed) ? 2.8f : 1.8f;
+            const auto sourceColour = transitionColourFor (rule.from);
+            const auto targetColour = graphColour (rule.to).interpolatedWith (ink(), 0.14f);
+            g.setColour ((fromSelected ? targetColour : sourceColour).withAlpha (lineAlpha + juce::jlimit (0.0f, 0.18f, rule.weight * 0.035f)));
+            g.strokePath (curve, juce::PathStrokeType (lineWidth + juce::jlimit (0.0f, 1.6f, rule.weight * 0.24f),
+                                                       juce::PathStrokeType::curved,
+                                                       juce::PathStrokeType::rounded));
 
             auto arrowPoint = from + (to - from) * 0.78f;
-            g.setColour (accentB().withAlpha (0.72f));
-            g.fillEllipse (arrowPoint.x - 3.0f, arrowPoint.y - 3.0f, 6.0f, 6.0f);
+            const auto dotRadius = (fromSelected || toPreviewed) ? 3.3f : 2.6f;
+            g.setColour ((toPreviewed ? graphColour (rule.to) : (fromSelected ? targetColour : sourceColour)).withAlpha ((fromSelected || toPreviewed) ? 0.82f : 0.50f));
+            g.fillEllipse (arrowPoint.x - dotRadius, arrowPoint.y - dotRadius, dotRadius * 2.0f, dotRadius * 2.0f);
         }
     }
 
@@ -513,8 +530,9 @@ private:
             auto selected = i == machine->selectedState;
             const auto previewed = i == previewStateIndex && i != machine->selectedState;
             auto laneCount = machine->getLaneCount (i);
+            const auto stateColour = graphColour (i);
 
-            juce::ColourGradient glow (selected ? accentA().withAlpha (0.55f) : (previewed ? accentB().withAlpha (0.30f) : accentC().withAlpha (0.18f)),
+            juce::ColourGradient glow ((selected ? stateColour.withAlpha (0.48f) : (previewed ? stateColour.withAlpha (0.34f) : stateColour.withAlpha (0.12f))),
                                        p.translated (-stateRadius, -stateRadius),
                                        juce::Colours::transparentBlack,
                                        p.translated (stateRadius, stateRadius),
@@ -533,10 +551,10 @@ private:
                 g.fillEllipse (p.x - stateRadius * 1.9f, p.y - stateRadius * 1.9f, stateRadius * 3.8f, stateRadius * 3.8f);
             }
 
-            g.setColour (selected ? selectedFill() : juce::Colour (0xff252a31));
+            g.setColour (selected ? stateColour.darker (0.74f).withAlpha (0.98f) : juce::Colour (0xff252a31).interpolatedWith (stateColour, 0.08f));
             g.fillEllipse (p.x - stateRadius, p.y - stateRadius, stateRadius * 2.0f, stateRadius * 2.0f);
 
-            g.setColour ((selected ? accentA() : mutedInk()).withAlpha (0.95f));
+            g.setColour ((selected ? stateColour.brighter (0.24f) : stateColour.interpolatedWith (mutedInk(), 0.28f)).withAlpha (selected ? 0.98f : 0.82f));
             g.drawEllipse (p.x - stateRadius, p.y - stateRadius, stateRadius * 2.0f, stateRadius * 2.0f, selected ? 3.0f : 1.5f);
             if (selected)
                 drawActiveStateRing (g, p);
@@ -548,7 +566,7 @@ private:
             if (child != nullptr)
             {
                 auto nestedRadius = stateRadius + 7.0f;
-                g.setColour ((selected ? accentC() : accentB()).withAlpha (selected ? 0.95f : 0.62f));
+                g.setColour (graphColour (i, 2).withAlpha (selected ? 0.82f : 0.50f));
                 g.drawEllipse (p.x - nestedRadius, p.y - nestedRadius, nestedRadius * 2.0f, nestedRadius * 2.0f, 2.0f);
                 drawNestedIndicator (g, *child, p, selected, child == inspectedMachine);
             }
@@ -595,7 +613,8 @@ private:
         g.fillEllipse (parentCentre.x - orbitRadius - 4.0f, parentCentre.y - orbitRadius - 4.0f,
                        (orbitRadius + 4.0f) * 2.0f, (orbitRadius + 4.0f) * 2.0f);
 
-        const auto ringColour = childInspected ? accentB() : juce::Colour (0xff6f7b88);
+        const auto baseColour = graphColour (child.entryState, 2);
+        const auto ringColour = childInspected ? baseColour.brighter (0.15f) : baseColour.interpolatedWith (mutedInk(), 0.28f);
         g.setColour (ringColour.withAlpha (childInspected ? 0.9f : (parentSelected ? 0.58f : 0.38f)));
         g.drawEllipse (parentCentre.x - orbitRadius, parentCentre.y - orbitRadius,
                        orbitRadius * 2.0f, orbitRadius * 2.0f, childInspected ? 2.4f : (parentSelected ? 2.0f : 1.3f));
@@ -612,7 +631,7 @@ private:
             juce::Path path;
             path.startNewSubPath (from);
             path.quadraticTo (control, to);
-            g.setColour ((parentSelected ? accentA() : accentB()).withAlpha (0.18f));
+            g.setColour (transitionColourFor (rule.from + 2).withAlpha (childInspected ? 0.25f : 0.16f));
             g.strokePath (path, juce::PathStrokeType (1.0f));
         }
 
@@ -620,7 +639,7 @@ private:
         {
             const auto point = childPoints[static_cast<size_t> (j)];
             const auto selected = j == child.selectedState;
-            const auto stateColour = paletteColour (j);
+            const auto stateColour = graphColour (j, 2);
             g.setColour ((selected && childInspected ? stateColour.brighter (0.35f) : stateColour).withAlpha (selected ? 0.98f : 0.84f));
             g.fillEllipse (point.x - nodeRadius, point.y - nodeRadius, nodeRadius * 2.0f, nodeRadius * 2.0f);
             g.setColour ((selected ? ink() : juce::Colour (0xff101318)).withAlpha (selected ? 0.82f : 0.92f));
@@ -633,7 +652,7 @@ private:
         auto badge = getNestedBadgeBounds (child, parentCentre);
         g.setColour (juce::Colour (0xff101318).withAlpha (0.96f));
         g.fillRoundedRectangle (badge, 6.0f);
-        g.setColour ((childInspected ? accentB() : (parentSelected ? accentA() : accentC())).withAlpha (0.88f));
+        g.setColour ((childInspected ? baseColour.brighter (0.12f) : (parentSelected ? accentA() : baseColour)).withAlpha (0.88f));
         g.drawRoundedRectangle (badge, 6.0f, 1.1f);
         g.setColour (ink());
         g.setFont (juce::FontOptions (10.5f, juce::Font::bold));
@@ -649,7 +668,8 @@ private:
         const auto orbit = getSecondLayerOrbitRadius();
         const auto nodeRadius = getSecondLayerNodeRadius (count);
 
-        g.setColour ((selected ? accentA() : accentC()).withAlpha (selected ? 0.70f : 0.42f));
+        const auto ringColour = graphColour (grandchild.entryState, 5);
+        g.setColour (ringColour.withAlpha (selected ? 0.78f : 0.48f));
         g.drawEllipse (childStateCentre.x - orbit, childStateCentre.y - orbit, orbit * 2.0f, orbit * 2.0f, selected ? 1.35f : 0.9f);
 
         for (int k = 0; k < count; ++k)
@@ -659,14 +679,15 @@ private:
             const auto point = juce::Point<float> { childStateCentre.x + std::cos (angle) * orbit,
                                                     childStateCentre.y + std::sin (angle) * orbit };
             const auto stateSelected = k == grandchild.selectedState;
-            g.setColour (paletteColour (k + 3).withAlpha (stateSelected ? 0.95f : 0.70f));
+            const auto stateColour = graphColour (k, 5);
+            g.setColour (stateColour.withAlpha (stateSelected ? 0.95f : 0.70f));
             g.fillEllipse (point.x - nodeRadius, point.y - nodeRadius, nodeRadius * 2.0f, nodeRadius * 2.0f);
         }
 
         auto badge = getSecondLayerBadgeBounds (grandchild, childStateCentre);
         g.setColour (juce::Colour (0xff101318).withAlpha (0.94f));
         g.fillRoundedRectangle (badge, 4.5f);
-        g.setColour ((selected ? accentA() : accentC()).withAlpha (0.82f));
+        g.setColour (ringColour.withAlpha (selected ? 0.88f : 0.72f));
         g.drawRoundedRectangle (badge, 4.5f, 0.9f);
         g.setColour (ink().withAlpha (0.95f));
         g.setFont (juce::FontOptions (8.8f, juce::Font::bold));
@@ -1169,20 +1190,27 @@ public:
             auto row = list.removeFromTop (26);
             const auto& r = machine->rules[static_cast<size_t> (i)];
             const auto selected = i == selectedRuleIndex;
-            g.setColour (selected ? selectedRow() : (i % 2 == 0 ? juce::Colour (0xff20252c) : juce::Colour (0xff1b2026)));
+            const auto fromColour = graphColour (r.from);
+            const auto toColour = graphColour (r.to);
+            g.setColour (selected ? juce::Colour (0xff20252c).interpolatedWith (fromColour, 0.22f)
+                                  : (i % 2 == 0 ? juce::Colour (0xff20252c) : juce::Colour (0xff1b2026)));
             g.fillRoundedRectangle (row.toFloat().reduced (1.0f), 4.0f);
             if (selected)
             {
-                g.setColour (accentC().withAlpha (0.88f));
+                g.setColour (fromColour.withAlpha (0.92f));
                 g.fillRoundedRectangle (row.removeFromLeft (4).toFloat().reduced (0.0f, 4.0f), 2.0f);
             }
 
             g.setColour (selected ? ink() : mutedInk());
 
             auto rowArea = row.reduced (8, 0);
+            g.setColour (selected ? fromColour.brighter (0.14f) : fromColour.withAlpha (0.74f));
             g.drawText (machine->state (r.from).name, rowArea.removeFromLeft (96), juce::Justification::centredLeft);
+            g.setColour (mutedInk().withAlpha (0.72f));
             g.drawText ("->", rowArea.removeFromLeft (24), juce::Justification::centred);
+            g.setColour (selected ? toColour.brighter (0.14f) : toColour.withAlpha (0.74f));
             g.drawText (machine->state (r.to).name, rowArea.removeFromLeft (96), juce::Justification::centredLeft);
+            g.setColour (selected ? ink() : mutedInk());
             g.drawText ("w " + juce::String (r.weight, 1), rowArea.removeFromRight (52), juce::Justification::centredRight);
         }
     }
@@ -1334,12 +1362,13 @@ public:
         for (int i = 0; i < static_cast<int> (buttons.size()); ++i)
         {
             auto cell = area.removeFromLeft (i == static_cast<int> (buttons.size()) - 1 ? area.getWidth() : width);
+            const auto stateColour = graphColour (i);
             buttons[static_cast<size_t> (i)]->setBounds (cell.reduced (2, 1));
             buttons[static_cast<size_t> (i)]->setColour (juce::TextButton::buttonColourId,
-                                                         i == selectedIndex ? selectedFill() : juce::Colour (0xff252a31));
-            buttons[static_cast<size_t> (i)]->setColour (juce::TextButton::buttonOnColourId, selectedFill());
+                                                         i == selectedIndex ? stateColour.darker (0.62f) : juce::Colour (0xff252a31).interpolatedWith (stateColour, 0.08f));
+            buttons[static_cast<size_t> (i)]->setColour (juce::TextButton::buttonOnColourId, stateColour.darker (0.55f));
             buttons[static_cast<size_t> (i)]->setColour (juce::TextButton::textColourOffId,
-                                                         i == selectedIndex ? accentA().brighter (0.2f) : mutedInk());
+                                                         i == selectedIndex ? stateColour.brighter (0.25f) : mutedInk());
         }
     }
 
@@ -1381,15 +1410,16 @@ public:
 
             if (selected)
             {
-                g.setColour (inspectedFill().withAlpha (0.95f));
+                const auto rowColour = graphColour (row.stateIndex, row.depth * 2);
+                g.setColour (inspectedFill().interpolatedWith (rowColour, 0.22f).withAlpha (0.95f));
                 g.fillRoundedRectangle (r.reduced (2.0f, 1.0f), 4.0f);
-                g.setColour (accentB().withAlpha (0.86f));
+                g.setColour (rowColour.withAlpha (0.86f));
                 g.drawRoundedRectangle (r.reduced (2.0f, 1.0f), 4.0f, 1.2f);
             }
 
             const auto dotX = static_cast<float> (row.bounds.getX() + 10 + row.depth * 14);
             const auto dotY = static_cast<float> (row.bounds.getCentreY());
-            g.setColour (active ? accentA() : paletteColour (row.depth + row.stateIndex));
+            g.setColour (active ? graphColour (row.stateIndex).brighter (0.18f) : graphColour (row.stateIndex, row.depth * 2));
             g.fillEllipse (dotX - 3.5f, dotY - 3.5f, 7.0f, 7.0f);
 
             g.setColour (selected ? ink() : mutedInk());
@@ -1524,7 +1554,8 @@ public:
                 const auto selected = i == selectedIndex;
 
                 const auto laneColour = getTrackColour (i);
-                g.setColour (selected ? selectedRow() : juce::Colour (0xff20252c).withAlpha (lane.enabled ? 1.0f : 0.48f));
+                g.setColour (selected ? juce::Colour (0xff20252c).interpolatedWith (laneColour, 0.24f)
+                                      : juce::Colour (0xff20252c).interpolatedWith (laneColour, 0.05f).withAlpha (lane.enabled ? 1.0f : 0.48f));
                 g.fillRoundedRectangle (row.toFloat(), 5.0f);
                 if (selected)
                 {
@@ -1542,13 +1573,13 @@ public:
                 g.setColour (lane.playing ? ink().withAlpha (0.85f) : juce::Colour (0xff101318).withAlpha (0.8f));
                 g.drawEllipse (dotArea.expanded (1.0f), lane.playing ? 1.4f : 0.8f);
 
-                auto buttons = rowText.removeFromRight (106);
-                drawToggle (g, buttons.removeFromLeft (25), "E", lane.enabled, accentB());
-                drawToggle (g, buttons.removeFromLeft (25), "M", lane.muted, accentC());
-                drawToggle (g, buttons.removeFromLeft (25), "S", lane.solo, accentA());
-                drawToggle (g, buttons.removeFromLeft (25), "F", lane.frozen, lane.freezeStale ? accentC() : accentB());
+                auto buttons = rowText.removeFromRight (92);
+                drawToggle (g, buttons.removeFromLeft (23), "E", lane.enabled, laneColour);
+                drawToggle (g, buttons.removeFromLeft (23), "M", lane.muted, graphColour (i, 4));
+                drawToggle (g, buttons.removeFromLeft (23), "S", lane.solo, graphColour (i, 1));
+                drawToggle (g, buttons.removeFromLeft (23), "F", lane.frozen, lane.freezeStale ? graphColour (i, 4) : graphColour (i, 2));
 
-                auto volumeArea = rowText.removeFromRight (68).reduced (8, 0);
+                auto volumeArea = rowText.removeFromRight (62).reduced (7, 0);
                 drawVolumeControl (g, volumeArea, lane.volume, laneColour, lane.enabled);
 
                 g.setColour (selected ? ink() : mutedInk().withAlpha (lane.enabled ? 1.0f : 0.52f));
@@ -1571,11 +1602,11 @@ public:
             auto row = list.removeFromTop (43).reduced (0, 4);
             if (row.contains (event.getPosition()))
             {
-                auto controls = row.reduced (10, 0).removeFromRight (106);
-                auto enabledArea = controls.removeFromLeft (25);
-                auto muteArea = controls.removeFromLeft (25);
-                auto soloArea = controls.removeFromLeft (25);
-                auto freezeArea = controls.removeFromLeft (25);
+                auto controls = row.reduced (10, 0).removeFromRight (92);
+                auto enabledArea = controls.removeFromLeft (23);
+                auto muteArea = controls.removeFromLeft (23);
+                auto soloArea = controls.removeFromLeft (23);
+                auto freezeArea = controls.removeFromLeft (23);
                 auto volumeArea = getVolumeBoundsForRow (row);
                 selectedIndex = i;
                 if (volumeArea.contains (event.getPosition()))
@@ -1644,7 +1675,7 @@ private:
 
     void drawToggle (juce::Graphics& g, juce::Rectangle<int> area, const juce::String& text, bool active, juce::Colour colour) const
     {
-        auto pill = area.reduced (2, 9).toFloat();
+        auto pill = area.reduced (2, 10).toFloat();
         g.setColour (active ? colour.withAlpha (0.92f) : juce::Colour (0xff111318));
         g.fillRoundedRectangle (pill, 3.0f);
         g.setColour (active ? juce::Colour (0xff111318).withAlpha (0.78f) : juce::Colour (0xff4b5560));
@@ -1677,8 +1708,8 @@ private:
     {
         auto rowText = row.reduced (10, 0);
         rowText.removeFromLeft (12);
-        rowText.removeFromRight (106);
-        return rowText.removeFromRight (68).reduced (8, 7);
+        rowText.removeFromRight (92);
+        return rowText.removeFromRight (62).reduced (7, 7);
     }
 
     void updateVolumeFromMouse (int index, float x)
@@ -1734,9 +1765,9 @@ private:
         const auto thumbHeight = juce::jmax (22.0f, track.getHeight() * static_cast<float> (viewportHeight) / static_cast<float> (contentHeight));
         const auto maxScroll = static_cast<float> (contentHeight - viewportHeight);
         const auto thumbY = track.getY() + (track.getHeight() - thumbHeight) * (scrollOffset / juce::jmax (1.0f, maxScroll));
-        g.setColour (accentB().withAlpha (0.12f));
+        g.setColour (graphColour (selectedIndex).withAlpha (0.12f));
         g.fillRoundedRectangle (track, 2.0f);
-        g.setColour (accentB().withAlpha (0.62f));
+        g.setColour (graphColour (selectedIndex).withAlpha (0.62f));
         g.fillRoundedRectangle (track.withY (thumbY).withHeight (thumbHeight), 2.0f);
     }
 
@@ -1786,7 +1817,7 @@ public:
         g.setColour (ink());
         g.setFont (juce::FontOptions (13.0f, juce::Font::bold));
         g.drawText ("Lane mix", header.removeFromLeft (90), juce::Justification::centredLeft);
-        g.setColour (transportRunning ? accentB().withAlpha (0.9f) : mutedInk().withAlpha (0.55f));
+        g.setColour (transportRunning ? graphColour (selectedIndex).withAlpha (0.9f) : mutedInk().withAlpha (0.55f));
         g.setFont (juce::FontOptions (10.5f, juce::Font::bold));
         g.drawText (transportRunning ? "LIVE" : "IDLE", header, juce::Justification::centredRight);
 
@@ -1908,7 +1939,8 @@ private:
         const auto peakLevel = meterToDisplay (meter.peak);
         const auto active = meter.live && meter.peak > 0.0015f;
 
-        g.setColour (selected ? selectedRow() : juce::Colour (0xff20252c).withAlpha (lane.enabled ? 1.0f : 0.48f));
+        g.setColour (selected ? juce::Colour (0xff20252c).interpolatedWith (laneColour, 0.24f)
+                              : juce::Colour (0xff20252c).interpolatedWith (laneColour, 0.05f).withAlpha (lane.enabled ? 1.0f : 0.48f));
         g.fillRoundedRectangle (row.toFloat(), 6.0f);
         g.setColour ((selected ? laneColour : juce::Colour (0xff414a55)).withAlpha (selected ? 0.95f : 0.75f));
         g.drawRoundedRectangle (row.toFloat(), 6.0f, selected ? 1.5f : 0.8f);
@@ -1922,8 +1954,8 @@ private:
         g.setColour (active ? ink().withAlpha (0.85f) : juce::Colour (0xff101318).withAlpha (0.9f));
         g.drawEllipse (dotArea.expanded (1.0f), active ? 1.3f : 0.8f);
 
-        auto valueArea = top.removeFromRight (38);
-        top.removeFromRight (104);
+        auto valueArea = top.removeFromRight (36);
+        top.removeFromRight (92);
         g.setColour (selected ? ink() : mutedInk().withAlpha (lane.enabled ? 0.95f : 0.46f));
         g.setFont (juce::FontOptions (12.0f, selected ? juce::Font::bold : juce::Font::plain));
         g.drawFittedText (lane.name, top, juce::Justification::centredLeft, 1);
@@ -1932,10 +1964,10 @@ private:
         g.setFont (juce::FontOptions (10.0f, juce::Font::bold));
         g.drawText (juce::String (lane.volume, 2), valueArea, juce::Justification::centredRight);
 
-        drawToggle (g, buttons.enabled, "E", lane.enabled, accentB());
-        drawToggle (g, buttons.mute, "M", lane.muted, accentC());
-        drawToggle (g, buttons.solo, "S", lane.solo, accentA());
-        drawToggle (g, buttons.freeze, "F", lane.frozen, lane.freezeStale ? accentC() : accentB());
+        drawToggle (g, buttons.enabled, "E", lane.enabled, laneColour);
+        drawToggle (g, buttons.mute, "M", lane.muted, graphColour (index, 4));
+        drawToggle (g, buttons.solo, "S", lane.solo, graphColour (index, 1));
+        drawToggle (g, buttons.freeze, "F", lane.frozen, lane.freezeStale ? graphColour (index, 4) : graphColour (index, 2));
 
         auto volumeArea = getVolumeBounds (row);
         const auto clipped = juce::jlimit (0.0f, 1.0f, lane.volume);
@@ -2001,12 +2033,12 @@ private:
 
     ButtonBounds getButtonBounds (juce::Rectangle<int> row) const
     {
-        auto buttons = row.reduced (10, 4).removeFromTop (22).removeFromRight (100);
+        auto buttons = row.reduced (10, 4).removeFromTop (22).removeFromRight (92);
         ButtonBounds result;
-        result.enabled = buttons.removeFromLeft (25);
-        result.mute = buttons.removeFromLeft (25);
-        result.solo = buttons.removeFromLeft (25);
-        result.freeze = buttons.removeFromLeft (25);
+        result.enabled = buttons.removeFromLeft (23);
+        result.mute = buttons.removeFromLeft (23);
+        result.solo = buttons.removeFromLeft (23);
+        result.freeze = buttons.removeFromLeft (23);
         return result;
     }
 
@@ -2051,9 +2083,9 @@ private:
         const auto thumbHeight = juce::jmax (22.0f, track.getHeight() * static_cast<float> (viewportHeight) / static_cast<float> (contentHeight));
         const auto maxScroll = static_cast<float> (contentHeight - viewportHeight);
         const auto thumbY = track.getY() + (track.getHeight() - thumbHeight) * (scrollOffset / juce::jmax (1.0f, maxScroll));
-        g.setColour (accentB().withAlpha (0.12f));
+        g.setColour (graphColour (selectedIndex).withAlpha (0.12f));
         g.fillRoundedRectangle (track, 2.0f);
-        g.setColour (accentB().withAlpha (0.62f));
+        g.setColour (graphColour (selectedIndex).withAlpha (0.62f));
         g.fillRoundedRectangle (track.withY (thumbY).withHeight (thumbHeight), 2.0f);
     }
 
@@ -2914,7 +2946,7 @@ public:
         updateCodeEditorFont();
         scriptEditor.setColour (juce::CodeEditorComponent::backgroundColourId, juce::Colour (0xff0f1116));
         scriptEditor.setColour (juce::CodeEditorComponent::defaultTextColourId, ink());
-        scriptEditor.setColour (juce::CodeEditorComponent::highlightColourId, accentB().withAlpha (0.24f));
+        scriptEditor.setColour (juce::CodeEditorComponent::highlightColourId, graphColour (1).withAlpha (0.24f));
         scriptEditor.setColour (juce::CodeEditorComponent::lineNumberBackgroundId, juce::Colour (0xff111820));
         scriptEditor.setColour (juce::CodeEditorComponent::lineNumberTextId, mutedInk().withAlpha (0.52f));
         scriptEditor.setColourScheme (scTokeniser.getDefaultColourScheme());
@@ -2942,8 +2974,8 @@ public:
             scriptEditor.grabKeyboardFocus();
         };
 
-        addLaneButton.setButtonText ("+ Lane");
-        removeLaneButton.setButtonText ("- Lane");
+        addLaneButton.setButtonText ("+L");
+        removeLaneButton.setButtonText ("-L");
         moveLaneUpButton.setButtonText ("Up");
         moveLaneDownButton.setButtonText ("Down");
         addChildMachineButton.setButtonText ("+ FSM");
@@ -3150,6 +3182,17 @@ public:
                                  juce::Colour (0xff242830), getLocalBounds().getBottomRight().toFloat(), false);
         g.setGradientFill (bg);
         g.fillAll();
+
+        auto strip = getLocalBounds().removeFromTop (3).toFloat();
+        juce::ColourGradient rainbow (graphColour (0).withAlpha (0.82f), strip.getTopLeft(),
+                                      graphColour (4).withAlpha (0.82f), strip.getTopRight(), false);
+        rainbow.addColour (0.18, graphColour (1).withAlpha (0.82f));
+        rainbow.addColour (0.36, graphColour (2).withAlpha (0.82f));
+        rainbow.addColour (0.54, graphColour (3).withAlpha (0.82f));
+        rainbow.addColour (0.72, graphColour (5).withAlpha (0.82f));
+        rainbow.addColour (0.88, graphColour (7).withAlpha (0.82f));
+        g.setGradientFill (rainbow);
+        g.fillRect (strip);
     }
 
     void resized() override
@@ -3284,13 +3327,13 @@ public:
         {
             auto trackNameRow = trackPaneInner.removeFromTop (34);
             trackNameEditor.setBounds (trackNameRow.reduced (0, 2));
-            auto trackHeader = trackPaneInner.removeFromTop (38);
-            trackPaneTitle.setBounds (trackHeader.removeFromLeft (68).reduced (2, 4));
-            moveLaneUpButton.setBounds (trackHeader.removeFromRight (54).reduced (3, 4));
-            moveLaneDownButton.setBounds (trackHeader.removeFromRight (64).reduced (3, 4));
-            auto laneButtonRow = trackPaneInner.removeFromTop (38);
-            addLaneButton.setBounds (laneButtonRow.removeFromLeft (92).reduced (0, 4));
-            removeLaneButton.setBounds (laneButtonRow.removeFromLeft (92).reduced (6, 4));
+            auto trackHeader = trackPaneInner.removeFromTop (42);
+            trackPaneTitle.setBounds (trackHeader.removeFromLeft (58).reduced (2, 4));
+            moveLaneUpButton.setBounds (trackHeader.removeFromRight (38).reduced (2, 5));
+            moveLaneDownButton.setBounds (trackHeader.removeFromRight (50).reduced (2, 5));
+            trackHeader.removeFromRight (6);
+            removeLaneButton.setBounds (trackHeader.removeFromRight (38).reduced (2, 5));
+            addLaneButton.setBounds (trackHeader.removeFromRight (38).reduced (2, 5));
             trackList.setBounds (trackPaneInner.reduced (0, 4));
             mixer.setBounds ({});
         }
@@ -3402,10 +3445,10 @@ private:
     void updateInspectorModeButtons()
     {
         const auto tracksActive = inspectorMode == InspectorMode::tracks;
-        tracksModeButton.setColour (juce::TextButton::buttonColourId, tracksActive ? selectedFill() : juce::Colour (0xff252a31));
-        tracksModeButton.setColour (juce::TextButton::textColourOffId, tracksActive ? accentA().brighter (0.15f) : mutedInk());
-        mixerModeButton.setColour (juce::TextButton::buttonColourId, ! tracksActive ? selectedFill() : juce::Colour (0xff252a31));
-        mixerModeButton.setColour (juce::TextButton::textColourOffId, ! tracksActive ? accentA().brighter (0.15f) : mutedInk());
+        tracksModeButton.setColour (juce::TextButton::buttonColourId, tracksActive ? graphColour (0).darker (0.58f) : juce::Colour (0xff252a31).interpolatedWith (graphColour (0), 0.08f));
+        tracksModeButton.setColour (juce::TextButton::textColourOffId, tracksActive ? graphColour (0).brighter (0.18f) : mutedInk());
+        mixerModeButton.setColour (juce::TextButton::buttonColourId, ! tracksActive ? graphColour (1).darker (0.58f) : juce::Colour (0xff252a31).interpolatedWith (graphColour (1), 0.08f));
+        mixerModeButton.setColour (juce::TextButton::textColourOffId, ! tracksActive ? graphColour (1).brighter (0.18f) : mutedInk());
     }
 
     LaneMeterValues meterForLane (const juce::String& laneId) const
@@ -5233,7 +5276,13 @@ private:
         topStateCountEditor.setText (juce::String (machine.getStateCount()), false);
         const auto selectedLanePlaying = currentInspectorMachine().selectedLaneRef().playing;
         playButton.setButtonText (selectedLanePlaying ? "Stop" : "Play");
-        playButton.setColour (juce::TextButton::buttonColourId, selectedLanePlaying ? accentC().darker (0.25f) : accentB().darker (0.35f));
+        playButton.setColour (juce::TextButton::buttonColourId,
+                              selectedLanePlaying ? graphColour (currentInspectorMachine().selectedLane, 4).darker (0.28f)
+                                                  : graphColour (currentInspectorMachine().selectedLane).darker (0.36f));
+        runButton.setColour (juce::TextButton::buttonColourId, fsmRunning ? graphColour (machine.selectedState).darker (0.42f)
+                                                                          : juce::Colour (0xff252a31).interpolatedWith (graphColour (machine.selectedState), 0.10f));
+        stepButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff252a31).interpolatedWith (graphColour (machine.selectedState + 1), 0.12f));
+        stopAllButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff252a31).interpolatedWith (graphColour (machine.selectedState + 4), 0.12f));
         moveLaneUpButton.setEnabled (currentInspectorMachine().selectedLane > 0);
         moveLaneDownButton.setEnabled (currentInspectorMachine().selectedLane < currentInspectorMachine().getLaneCount (currentInspectorMachine().selectedState) - 1);
         const auto hasChild = currentInspectorMachine().hasChildMachine (currentInspectorMachine().selectedState);
