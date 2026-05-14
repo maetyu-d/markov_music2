@@ -3,6 +3,7 @@
 #include "FsmModel.h"
 #include "SuperColliderHost.h"
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -64,6 +65,9 @@ public:
 
     void setInspectedMachine (MachineModel* inspected)
     {
+        if (inspectedMachine == inspected)
+            return;
+
         inspectedMachine = inspected;
         repaint();
     }
@@ -111,8 +115,12 @@ public:
 
     void setTransitionPreview (int stateIndex, float probability)
     {
+        probability = juce::jlimit (0.0f, 1.0f, probability);
+        if (previewStateIndex == stateIndex && std::abs (previewProbability - probability) < 0.001f)
+            return;
+
         previewStateIndex = stateIndex;
-        previewProbability = juce::jlimit (0.0f, 1.0f, probability);
+        previewProbability = probability;
         repaint();
     }
 
@@ -355,30 +363,65 @@ private:
         stateRadius = juce::jmap (static_cast<float> (count), 1.0f, static_cast<float> (maxStateCount), 54.0f, 34.0f);
         stateRadius = juce::jlimit (34.0f, 54.0f, stateRadius);
 
-        const auto outerMargin = getOuterNodeExtent() + 28.0f;
-        auto area = getLocalBounds().toFloat().reduced (outerMargin, outerMargin * 0.78f);
+        const auto demoLayout = isRootDemoLayout();
+        const auto outerMargin = demoLayout ? stateRadius * 1.95f : getOuterNodeExtent() + 28.0f;
+        auto area = getLocalBounds().toFloat().reduced (outerMargin, demoLayout ? stateRadius * 1.45f : outerMargin * 0.78f);
         const auto maxLayoutWidth = area.getHeight() * 4.25f;
-        if (area.getWidth() > maxLayoutWidth)
+        if (! demoLayout && area.getWidth() > maxLayoutWidth)
             area = area.withSizeKeepingCentre (maxLayoutWidth, area.getHeight());
 
-        auto centre = area.getCentre();
-        auto rx = area.getWidth() * 0.50f;
-        auto ry = area.getHeight() * 0.47f;
-
-        for (int i = 0; i < count; ++i)
+        const auto demoApplied = applyDemoLayout (area);
+        if (! demoApplied)
         {
-            auto angle = (juce::MathConstants<float>::twoPi * static_cast<float> (i) / static_cast<float> (count))
-                       - juce::MathConstants<float>::halfPi;
-            statePositions[static_cast<size_t> (i)] = { centre.x + std::cos (angle) * rx,
-                                                        centre.y + std::sin (angle) * ry };
+            auto centre = area.getCentre();
+            auto rx = area.getWidth() * 0.50f;
+            auto ry = area.getHeight() * 0.47f;
+
+            for (int i = 0; i < count; ++i)
+            {
+                auto angle = (juce::MathConstants<float>::twoPi * static_cast<float> (i) / static_cast<float> (count))
+                           - juce::MathConstants<float>::halfPi;
+                statePositions[static_cast<size_t> (i)] = { centre.x + std::cos (angle) * rx,
+                                                            centre.y + std::sin (angle) * ry };
+            }
         }
 
-        relaxStatePositions (area);
+        if (! demoApplied)
+            relaxStatePositions (area);
         if (includeManualOffsets)
             applyManualNodeOffsets();
 
         if (applyViewTransform)
             applyViewTransformToLayout();
+    }
+
+    bool isRootDemoLayout() const
+    {
+        return machine->machineId == "root" && machine->getStateCount() == 6;
+    }
+
+    bool applyDemoLayout (juce::Rectangle<float> area)
+    {
+        if (! isRootDemoLayout())
+            return false;
+
+        static constexpr std::array<juce::Point<float>, 6> normalised {{
+            { 0.15f, 0.76f },
+            { 0.68f, 0.51f },
+            { 0.90f, 0.29f },
+            { 0.27f, 0.38f },
+            { 0.50f, 0.22f },
+            { 0.53f, 0.77f }
+        }};
+
+        for (int i = 0; i < 6; ++i)
+        {
+            const auto p = normalised[static_cast<size_t> (i)];
+            statePositions[static_cast<size_t> (i)] = { area.getX() + p.x * area.getWidth(),
+                                                        area.getY() + p.y * area.getHeight() };
+        }
+
+        return true;
     }
 
     void clearNodePositionLock()
@@ -1064,7 +1107,17 @@ private:
             onNestedStateCountChanged (parentStateIndex, newCount);
     }
 
-    void timerCallback() override { repaint(); }
+    void timerCallback() override
+    {
+        if (pulseReceivedMs <= 0.0)
+            return;
+
+        const auto ageMs = juce::Time::getMillisecondCounterHiRes() - pulseReceivedMs;
+        if (ageMs < 1900.0)
+            repaint();
+        else
+            pulseReceivedMs = 0.0;
+    }
 
     MachineModel* machine;
     MachineModel* inspectedMachine = nullptr;
@@ -1147,8 +1200,24 @@ public:
 
     void setMachine (MachineModel& modelToUse)
     {
+        const auto stateCount = modelToUse.getStateCount();
+        const auto ruleCount = static_cast<int> (modelToUse.rules.size());
+        const auto selected = modelToUse.selectedState;
+        const auto needsChoices = machine != &modelToUse
+                               || cachedStateCount != stateCount
+                               || cachedSelectedState != selected
+                               || cachedRuleCount != ruleCount;
+
         machine = &modelToUse;
-        selectedRuleIndex = -1;
+        if (! needsChoices)
+            return;
+
+        if (cachedStateCount != stateCount || cachedRuleCount != ruleCount || selectedRuleIndex >= ruleCount)
+            selectedRuleIndex = -1;
+
+        cachedStateCount = stateCount;
+        cachedSelectedState = selected;
+        cachedRuleCount = ruleCount;
         refreshChoices();
         repaint();
     }
@@ -1313,6 +1382,9 @@ private:
     juce::TextButton removeButton;
     juce::TextButton ringButton;
     int selectedRuleIndex = -1;
+    int cachedStateCount = -1;
+    int cachedSelectedState = -1;
+    int cachedRuleCount = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RuleListComponent)
 };
@@ -1578,7 +1650,8 @@ public:
                 drawToggle (g, buttons.removeFromLeft (23), "E", lane.enabled, laneColour);
                 drawToggle (g, buttons.removeFromLeft (23), "M", lane.muted, graphColour (i, 4));
                 drawToggle (g, buttons.removeFromLeft (23), "S", lane.solo, graphColour (i, 1));
-                drawToggle (g, buttons.removeFromLeft (23), lane.frozen && lane.freezeStale ? "!" : "F", lane.frozen, lane.freezeStale ? graphColour (i, 4) : graphColour (i, 2));
+                const auto freezeText = lane.freezeInProgress ? "..." : (lane.frozen && lane.freezeStale ? "!" : "F");
+                drawToggle (g, buttons.removeFromLeft (23), freezeText, lane.frozen || lane.freezeInProgress, lane.freezeStale ? graphColour (i, 4) : graphColour (i, 2));
 
                 auto volumeArea = rowText.removeFromRight (62).reduced (7, 0);
                 drawVolumeControl (g, volumeArea, lane.volume, laneColour, lane.enabled);
@@ -1989,7 +2062,8 @@ private:
         drawToggle (g, buttons.enabled, "E", lane.enabled, laneColour);
         drawToggle (g, buttons.mute, "M", lane.muted, graphColour (index, 4));
         drawToggle (g, buttons.solo, "S", lane.solo, graphColour (index, 1));
-        drawToggle (g, buttons.freeze, lane.frozen && lane.freezeStale ? "!" : "F", lane.frozen, lane.freezeStale ? graphColour (index, 4) : graphColour (index, 2));
+        const auto freezeText = lane.freezeInProgress ? "..." : (lane.frozen && lane.freezeStale ? "!" : "F");
+        drawToggle (g, buttons.freeze, freezeText, lane.frozen || lane.freezeInProgress, lane.freezeStale ? graphColour (index, 4) : graphColour (index, 2));
 
         auto volumeArea = getVolumeBounds (row);
         const auto clipped = juce::jlimit (0.0f, 1.0f, lane.volume);
@@ -2438,14 +2512,12 @@ private:
     }
 };
 
-class SuperColliderCodeEditor final : public juce::CodeEditorComponent,
-                                      private juce::Timer
+class SuperColliderCodeEditor final : public juce::CodeEditorComponent
 {
 public:
     SuperColliderCodeEditor (juce::CodeDocument& document, juce::CodeTokeniser* tokeniser)
         : juce::CodeEditorComponent (document, tokeniser)
     {
-        startTimerHz (20);
     }
 
     void paintOverChildren (juce::Graphics& g) override
@@ -2460,11 +2532,6 @@ public:
     }
 
 private:
-    void timerCallback() override
-    {
-        repaint();
-    }
-
     void drawCurrentLine (juce::Graphics& g)
     {
         const auto caret = getCaretPos();
@@ -3633,14 +3700,14 @@ private:
 
     void updateCodeStats()
     {
-        const auto text = codeDocument.getAllContent();
         const auto lineCount = codeDocument.getNumLines();
         const auto caret = scriptEditor.getCaretPos();
+        const auto chars = currentInspectorMachine().selectedLaneRef().script.length();
 
         codeStatsLabel.setText ("Ln " + juce::String (caret.getLineNumber() + 1)
                                 + ", Col " + juce::String (caret.getIndexInLine() + 1)
                                 + "  ·  " + juce::String (lineCount) + " lines"
-                                + "  ·  " + juce::String (text.length()) + " chars",
+                                + "  ·  " + juce::String (chars) + " chars",
                                 juce::dontSendNotification);
     }
 
@@ -3835,10 +3902,12 @@ private:
 
         lane->frozen = true;
         lane->freezeStale = false;
+        lane->freezeInProgress = false;
         lane->frozenAudioPath = message[1].getString();
         lane->preparedBridge = -1;
         statusLabel.setText ("Freeze ready", juce::dontSendNotification);
         markMachineDirty (UndoGroup::continuous);
+        refreshProjectMediaStatus();
         refreshControls();
     }
 
@@ -4092,6 +4161,11 @@ private:
     {
         const auto summary = mediaStatusSummary (status);
         return summary.isEmpty() ? prefix : prefix + ": " + summary;
+    }
+
+    void refreshProjectMediaStatus (const juce::File& projectFile = {})
+    {
+        cachedProjectMediaStatus = validateProjectMedia (projectFile);
     }
 
     void bundleFrozenMediaForProject (MachineModel& model, const juce::File& projectFile)
@@ -4388,6 +4462,7 @@ private:
         lane.frozenAudioPath = resolveProjectMediaPathForLoad (value.getProperty ("frozenAudioPath", {}).toString());
         if (lane.frozen && lane.frozenAudioPath.isNotEmpty() && ! juce::File (lane.frozenAudioPath).existsAsFile())
             lane.freezeStale = true;
+        lane.freezeInProgress = false;
         lane.playing = false;
         lane.preparedBridge = -1;
         return true;
@@ -4507,14 +4582,22 @@ private:
             addRecentProject (file);
             saveAppState();
         }
+        refreshProjectMediaStatus (file);
+        lastProjectMediaStatus = projectStatusAfterMediaCheck ("Project loaded", cachedProjectMediaStatus);
         topStateCountEditor.setText (juce::String (machine.getStateCount()), false);
         refreshControls();
         if (! loadingProjectInternally)
-            startPrepareJob (false);
+        {
+            auto safeThis = juce::Component::SafePointer<MainComponent> (this);
+            juce::Timer::callAfterDelay (250, [safeThis]
+            {
+                if (safeThis != nullptr && ! safeThis->loadingProjectInternally)
+                    safeThis->startPrepareJob (false);
+            });
+        }
         dirtyProject = false;
         saveProjectButton.setButtonText ("Save");
         resetUndoHistory();
-        lastProjectMediaStatus = projectStatusAfterMediaCheck ("Project loaded", validateProjectMedia (file));
         return true;
     }
 
@@ -4534,7 +4617,8 @@ private:
         saveProjectButton.setButtonText ("Save");
         lastProjectSnapshot = makeProjectSnapshotString();
         saveAppState();
-        lastProjectMediaStatus = projectStatusAfterMediaCheck ("Project saved", validateProjectMedia (file));
+        refreshProjectMediaStatus (file);
+        lastProjectMediaStatus = projectStatusAfterMediaCheck ("Project saved", cachedProjectMediaStatus);
         return true;
     }
 
@@ -5540,9 +5624,18 @@ private:
         auto& lane = inspected.selectedLaneRef();
         if (lane.frozen)
         {
+            if (lane.freezeInProgress)
+            {
+                statusLabel.setText ("Freeze already running", juce::dontSendNotification);
+                refreshControls();
+                return;
+            }
+
             lane.frozen = false;
+            lane.freezeInProgress = false;
             lane.preparedBridge = -1;
             statusLabel.setText ("Live code", juce::dontSendNotification);
+            refreshProjectMediaStatus();
         }
         else
         {
@@ -5550,6 +5643,7 @@ private:
                 statusLabel.setText ("Freeze failed", juce::dontSendNotification);
             else
                 statusLabel.setText ("Freezing lane", juce::dontSendNotification);
+            refreshProjectMediaStatus();
         }
         markMachineDirty();
         refreshControls();
@@ -5565,13 +5659,21 @@ private:
             return false;
 
         auto& lane = state.lanes[static_cast<size_t> (laneIndex)];
+        if (lane.freezeInProgress)
+            return false;
+
         lane.frozen = true;
         lane.freezeStale = true;
+        lane.freezeInProgress = true;
         lane.frozenAudioPath = freezeFileForLane (lane).getFullPathName();
         lane.preparedBridge = -1;
 
         const auto duration = state.secondsPerBar() / juce::jmax (0.05, rateSlider.getValue());
-        return host.freezeLane (lane, getSclangPathOverride(), duration, juce::File (lane.frozenAudioPath));
+        if (host.freezeLane (lane, getSclangPathOverride(), duration, juce::File (lane.frozenAudioPath)))
+            return true;
+
+        lane.freezeInProgress = false;
+        return false;
     }
 
     int refreezeStaleFrozenLanesInMachine (MachineModel& model)
@@ -5583,7 +5685,7 @@ private:
             for (int laneIndex = 0; laneIndex < static_cast<int> (state.lanes.size()); ++laneIndex)
             {
                 auto& lane = state.lanes[static_cast<size_t> (laneIndex)];
-                if (lane.frozen && lane.freezeStale && beginFreezeLane (model, stateIndex, laneIndex))
+                if (lane.frozen && lane.freezeStale && ! lane.freezeInProgress && beginFreezeLane (model, stateIndex, laneIndex))
                     ++count;
             }
 
@@ -5617,6 +5719,7 @@ private:
         {
             statusLabel.setText ("Refreezing " + juce::String (count) + " stale lane" + (count == 1 ? "" : "s"), juce::dontSendNotification);
             markMachineDirty();
+            refreshProjectMediaStatus();
         }
         else
         {
@@ -5637,6 +5740,22 @@ private:
 
             if (auto* child = model.childMachine (state.index))
                 count += countStaleFrozenLanes (*child);
+        }
+
+        return count;
+    }
+
+    int countFreezingLanes (const MachineModel& model) const
+    {
+        auto count = 0;
+        for (const auto& state : model.states)
+        {
+            for (const auto& lane : state.lanes)
+                if (lane.freezeInProgress)
+                    ++count;
+
+            if (auto* child = model.childMachine (state.index))
+                count += countFreezingLanes (*child);
         }
 
         return count;
@@ -5728,28 +5847,37 @@ private:
         updateCodeStats();
         trackNameEditor.setText (currentInspectorMachine().selectedLaneRef().name, false);
         const auto& selectedLane = currentInspectorMachine().selectedLaneRef();
-        const auto mediaStatus = validateProjectMedia();
+        const auto mediaStatus = cachedProjectMediaStatus;
         const auto mediaSummary = mediaStatusSummary (mediaStatus);
-        if (! selectedLane.frozen)
+        const auto freezingCount = countFreezingLanes (machine);
+        const auto freezeSuffix = freezingCount > 0 ? " · " + juce::String (freezingCount) + " freezing" : juce::String();
+        if (selectedLane.freezeInProgress)
         {
-            freezeStatusLabel.setText (mediaSummary.isEmpty() ? "Live code" : "Live code · " + mediaSummary, juce::dontSendNotification);
+            freezeStatusLabel.setText ("Freezing selected lane" + freezeSuffix, juce::dontSendNotification);
+            freezeStatusLabel.setColour (juce::Label::textColourId, graphColour (currentInspectorMachine().selectedLane).brighter (0.16f));
+            refreezeLaneButton.setButtonText ("Freezing");
+        }
+        else if (! selectedLane.frozen)
+        {
+            freezeStatusLabel.setText ((mediaSummary.isEmpty() ? "Live code" : "Live code · " + mediaSummary) + freezeSuffix, juce::dontSendNotification);
             freezeStatusLabel.setColour (juce::Label::textColourId, mediaStatus.needsAttention() ? graphColour (currentInspectorMachine().selectedLane, 4).brighter (0.18f) : mutedInk());
             refreezeLaneButton.setButtonText ("Freeze");
         }
         else if (selectedLane.freezeStale)
         {
-            freezeStatusLabel.setText (mediaSummary.isEmpty() ? "Freeze stale: render again" : "Freeze stale: " + mediaSummary, juce::dontSendNotification);
+            freezeStatusLabel.setText ((mediaSummary.isEmpty() ? "Freeze stale: render again" : "Freeze stale: " + mediaSummary) + freezeSuffix, juce::dontSendNotification);
             freezeStatusLabel.setColour (juce::Label::textColourId, graphColour (currentInspectorMachine().selectedLane, 4).brighter (0.20f));
             refreezeLaneButton.setButtonText ("Refreeze");
         }
         else
         {
-            freezeStatusLabel.setText (mediaSummary.isEmpty() ? "Frozen audio ready" : "Frozen audio · " + mediaSummary, juce::dontSendNotification);
+            freezeStatusLabel.setText ((mediaSummary.isEmpty() ? "Frozen audio ready" : "Frozen audio · " + mediaSummary) + freezeSuffix, juce::dontSendNotification);
             freezeStatusLabel.setColour (juce::Label::textColourId, mediaStatus.needsAttention() ? graphColour (currentInspectorMachine().selectedLane, 4).brighter (0.18f)
                                                                                                   : graphColour (currentInspectorMachine().selectedLane, 2).brighter (0.12f));
             refreezeLaneButton.setButtonText ("Refreeze");
         }
-        refreezeStaleButton.setEnabled (mediaStatus.stale > 0 || mediaStatus.missing > 0);
+        refreezeLaneButton.setEnabled (! selectedLane.freezeInProgress);
+        refreezeStaleButton.setEnabled ((mediaStatus.stale > 0 || mediaStatus.missing > 0) && freezingCount == 0);
         breadcrumbLabel.setText (makeBreadcrumb(), juce::dontSendNotification);
         stateSummaryLabel.setText (makeStateSummary(), juce::dontSendNotification);
         const auto& inspectedState = currentInspectorMachine().state (currentInspectorMachine().selectedState);
@@ -5924,6 +6052,7 @@ private:
     std::unique_ptr<juce::FileChooser> projectChooser;
     juce::File currentProjectFile;
     juce::File loadingProjectDirectory;
+    ProjectMediaStatus cachedProjectMediaStatus;
     juce::String lastProjectMediaStatus = "Project ready";
     juce::StringArray recentProjects;
     bool dirtyProject = false;

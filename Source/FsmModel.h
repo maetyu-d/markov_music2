@@ -51,6 +51,7 @@ struct Lane
     bool solo = false;
     bool frozen = false;
     bool freezeStale = false;
+    bool freezeInProgress = false;
     juce::String frozenAudioPath;
     bool playing = false;
     int preparedBridge = -1;
