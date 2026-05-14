@@ -26,6 +26,8 @@ target_compile_definitions(MarkovFSM
 
 target_link_libraries(MarkovFSM
     PRIVATE
+        juce::juce_audio_devices
+        juce::juce_audio_utils
         juce::juce_gui_extra
         juce::juce_osc
     PUBLIC

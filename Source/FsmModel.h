@@ -110,6 +110,10 @@ public:
     }
 
     ~MachineModel() = default;
+    MachineModel (MachineModel&&) noexcept = default;
+    MachineModel& operator= (MachineModel&&) noexcept = default;
+    MachineModel (const MachineModel&) = delete;
+    MachineModel& operator= (const MachineModel&) = delete;
 
     void setStateCount (int newCount)
     {

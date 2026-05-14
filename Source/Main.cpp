@@ -1,3 +1,5 @@
+#include <juce_audio_devices/juce_audio_devices.h>
+#include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_gui_extra/juce_gui_extra.h>
 #include <juce_osc/juce_osc.h>
 #include "FsmModel.h"
@@ -2639,6 +2641,70 @@ private:
     }
 };
 
+class AudioSettingsComponent final : public juce::Component
+{
+public:
+    explicit AudioSettingsComponent (juce::AudioDeviceManager& manager)
+        : selector (manager, 0, 0, 0, 2, false, false, true, false)
+    {
+        addAndMakeVisible (title);
+        addAndMakeVisible (note);
+        addAndMakeVisible (selector);
+
+        title.setText ("Settings", juce::dontSendNotification);
+        title.setFont (juce::FontOptions (21.0f, juce::Font::bold));
+        title.setColour (juce::Label::textColourId, ink());
+
+        note.setText ("Audio device settings for the app. SuperCollider output follows its own server/system audio routing until dedicated SC device selection is added.",
+                      juce::dontSendNotification);
+        note.setFont (juce::FontOptions (12.5f));
+        note.setColour (juce::Label::textColourId, mutedInk());
+        note.setJustificationType (juce::Justification::centredLeft);
+
+        selector.setItemHeight (24);
+        setSize (520, 470);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        juce::ColourGradient bg (backgroundTop(), 0.0f, 0.0f, backgroundBottom(), 0.0f, static_cast<float> (getHeight()), false);
+        g.setGradientFill (bg);
+        g.fillAll();
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds().reduced (18, 16);
+        title.setBounds (area.removeFromTop (30));
+        note.setBounds (area.removeFromTop (54));
+        area.removeFromTop (8);
+        selector.setBounds (area);
+    }
+
+private:
+    juce::Label title;
+    juce::Label note;
+    juce::AudioDeviceSelectorComponent selector;
+};
+
+class SettingsWindow final : public juce::DocumentWindow
+{
+public:
+    explicit SettingsWindow (juce::AudioDeviceManager& manager)
+        : DocumentWindow ("Settings", backgroundTop(), DocumentWindow::closeButton)
+    {
+        setUsingNativeTitleBar (true);
+        setContentOwned (new AudioSettingsComponent (manager), true);
+        setResizable (false, false);
+        centreWithSize (520, 470);
+    }
+
+    void closeButtonPressed() override
+    {
+        setVisible (false);
+    }
+};
+
 class MainComponent final : public juce::Component,
                             private juce::CodeDocument::Listener,
                             private juce::OSCReceiver,
@@ -2649,6 +2715,7 @@ public:
     MainComponent() : graph (machine), rules (machine), scriptEditor (codeDocument, &scTokeniser)
     {
         setSize (1180, 760);
+        audioDeviceManager.initialise (0, 2, nullptr, true);
 
         addAndMakeVisible (title);
         addAndMakeVisible (statusLabel);
@@ -3040,7 +3107,7 @@ public:
 
         saveProjectButton.onClick = [this]
         {
-            chooseProjectToSave();
+            saveCurrentProject();
         };
 
         undoButton.onClick = [this]
@@ -3383,6 +3450,7 @@ public:
 
     ~MainComponent() override
     {
+        settingsWindow = nullptr;
         autosaveIfNeeded (true);
         saveAppState();
         stopTimer();
@@ -3393,6 +3461,68 @@ public:
         stopMachineRecursive (machine);
         host.onLogMessage = nullptr;
         host.onStatusChanged = nullptr;
+    }
+
+    void newProject()
+    {
+        fsmRunning = false;
+        stopTransport();
+        host.pauseMachine();
+        host.stopAll (machine);
+        runButton.setButtonText ("Run");
+
+        machine = MachineModel();
+        machineStack.clear();
+        activeMachine = &machine;
+        inspectedMachine = &machine;
+        currentProjectFile = juce::File();
+        laneMeters.clear();
+        machinePrepared = false;
+        dirtyProject = false;
+        cachedProjectMediaStatus = {};
+        lastProjectMediaStatus = "New project";
+        graph.setMachine (machine);
+        graph.setInspectedMachine (&machine);
+        rules.setMachine (machine);
+        topStateCountEditor.setText (juce::String (machine.getStateCount()), false);
+        saveProjectButton.setButtonText ("Save");
+        statusLabel.setText ("New project", juce::dontSendNotification);
+        resetUndoHistory();
+        refreshControls();
+    }
+
+    void loadProject()
+    {
+        chooseProjectToLoad();
+    }
+
+    void saveCurrentProject()
+    {
+        if (currentProjectFile.existsAsFile())
+        {
+            if (saveProjectToFile (currentProjectFile))
+                statusLabel.setText (lastProjectMediaStatus, juce::dontSendNotification);
+            else
+                statusLabel.setText ("Save failed", juce::dontSendNotification);
+        }
+        else
+        {
+            saveProjectAs();
+        }
+    }
+
+    void saveProjectAs()
+    {
+        chooseProjectToSave();
+    }
+
+    void showSettings()
+    {
+        if (settingsWindow == nullptr)
+            settingsWindow = std::make_unique<SettingsWindow> (audioDeviceManager);
+
+        settingsWindow->setVisible (true);
+        settingsWindow->toFront (true);
     }
 
     void paint (juce::Graphics& g) override
@@ -3706,8 +3836,8 @@ private:
 
         codeStatsLabel.setText ("Ln " + juce::String (caret.getLineNumber() + 1)
                                 + ", Col " + juce::String (caret.getIndexInLine() + 1)
-                                + "  ·  " + juce::String (lineCount) + " lines"
-                                + "  ·  " + juce::String (chars) + " chars",
+                                + "  |  " + juce::String (lineCount) + " lines"
+                                + "  |  " + juce::String (chars) + " chars",
                                 juce::dontSendNotification);
     }
 
@@ -4952,10 +5082,10 @@ private:
         const auto laneCount = static_cast<int> (s.lanes.size());
         auto activeText = (&inspected == activeMachine) ? "active" : "inspecting";
         const auto nestedText = inspected.hasChildMachine (inspected.selectedState) ? "nested FSM" : "no nested FSM";
-        return s.name + "  ·  " + juce::String (laneCount) + (laneCount == 1 ? " track" : " tracks")
-             + "  ·  " + juce::String (s.tempoBpm, 1) + " BPM"
-             + "  ·  " + juce::String (s.beatsPerBar) + "/" + juce::String (s.beatUnit)
-             + "  ·  " + activeText + "  ·  " + nestedText;
+        return s.name + "  |  " + juce::String (laneCount) + (laneCount == 1 ? " track" : " tracks")
+             + "  |  " + juce::String (s.tempoBpm, 1) + " BPM"
+             + "  |  " + juce::String (s.beatsPerBar) + "/" + juce::String (s.beatUnit)
+             + "  |  " + activeText + "  |  " + nestedText;
     }
 
     juce::String getSclangPathOverride() const
@@ -5850,7 +5980,7 @@ private:
         const auto mediaStatus = cachedProjectMediaStatus;
         const auto mediaSummary = mediaStatusSummary (mediaStatus);
         const auto freezingCount = countFreezingLanes (machine);
-        const auto freezeSuffix = freezingCount > 0 ? " · " + juce::String (freezingCount) + " freezing" : juce::String();
+        const auto freezeSuffix = freezingCount > 0 ? " | " + juce::String (freezingCount) + " freezing" : juce::String();
         if (selectedLane.freezeInProgress)
         {
             freezeStatusLabel.setText ("Freezing selected lane" + freezeSuffix, juce::dontSendNotification);
@@ -5859,7 +5989,7 @@ private:
         }
         else if (! selectedLane.frozen)
         {
-            freezeStatusLabel.setText ((mediaSummary.isEmpty() ? "Live code" : "Live code · " + mediaSummary) + freezeSuffix, juce::dontSendNotification);
+            freezeStatusLabel.setText ((mediaSummary.isEmpty() ? "Live code" : "Live code | " + mediaSummary) + freezeSuffix, juce::dontSendNotification);
             freezeStatusLabel.setColour (juce::Label::textColourId, mediaStatus.needsAttention() ? graphColour (currentInspectorMachine().selectedLane, 4).brighter (0.18f) : mutedInk());
             refreezeLaneButton.setButtonText ("Freeze");
         }
@@ -5871,7 +6001,7 @@ private:
         }
         else
         {
-            freezeStatusLabel.setText ((mediaSummary.isEmpty() ? "Frozen audio ready" : "Frozen audio · " + mediaSummary) + freezeSuffix, juce::dontSendNotification);
+            freezeStatusLabel.setText ((mediaSummary.isEmpty() ? "Frozen audio ready" : "Frozen audio | " + mediaSummary) + freezeSuffix, juce::dontSendNotification);
             freezeStatusLabel.setColour (juce::Label::textColourId, mediaStatus.needsAttention() ? graphColour (currentInspectorMachine().selectedLane, 4).brighter (0.18f)
                                                                                                   : graphColour (currentInspectorMachine().selectedLane, 2).brighter (0.12f));
             refreezeLaneButton.setButtonText ("Refreeze");
@@ -6055,6 +6185,8 @@ private:
     ProjectMediaStatus cachedProjectMediaStatus;
     juce::String lastProjectMediaStatus = "Project ready";
     juce::StringArray recentProjects;
+    juce::AudioDeviceManager audioDeviceManager;
+    std::unique_ptr<SettingsWindow> settingsWindow;
     bool dirtyProject = false;
     bool loadingProjectInternally = false;
     bool suppressUndoCapture = false;
@@ -6068,7 +6200,8 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };
 
-class MarkovApplication final : public juce::JUCEApplication
+class MarkovApplication final : public juce::JUCEApplication,
+                                private juce::MenuBarModel
 {
 public:
     const juce::String getApplicationName() override { return "Markov FSM"; }
@@ -6078,10 +6211,18 @@ public:
     void initialise (const juce::String&) override
     {
         mainWindow = std::make_unique<MainWindow> (getApplicationName());
+
+       #if JUCE_MAC
+        juce::MenuBarModel::setMacMainMenu (this);
+       #endif
     }
 
     void shutdown() override
     {
+       #if JUCE_MAC
+        juce::MenuBarModel::setMacMainMenu (nullptr);
+       #endif
+
         mainWindow = nullptr;
     }
 
@@ -6091,6 +6232,63 @@ public:
     }
 
 private:
+    enum MenuItemIds
+    {
+        newProjectItem = 1,
+        loadProjectItem,
+        saveProjectItem,
+        saveProjectAsItem,
+        settingsItem
+    };
+
+    juce::StringArray getMenuBarNames() override
+    {
+        return { "File" };
+    }
+
+    juce::PopupMenu getMenuForIndex (int menuIndex, const juce::String& menuName) override
+    {
+        juce::ignoreUnused (menuIndex);
+
+        juce::PopupMenu menu;
+
+        if (menuName == "File")
+        {
+            menu.addItem (newProjectItem, "New");
+            menu.addItem (loadProjectItem, "Load...");
+            menu.addSeparator();
+            menu.addItem (saveProjectItem, "Save");
+            menu.addItem (saveProjectAsItem, "Save As...");
+            menu.addSeparator();
+            menu.addItem (settingsItem, "Settings...");
+        }
+
+        return menu;
+    }
+
+    void menuItemSelected (int menuItemID, int topLevelMenuIndex) override
+    {
+        juce::ignoreUnused (topLevelMenuIndex);
+
+        if (mainWindow == nullptr)
+            return;
+
+        auto* main = mainWindow->getMainComponent();
+
+        if (main == nullptr)
+            return;
+
+        switch (menuItemID)
+        {
+            case newProjectItem:     main->newProject(); break;
+            case loadProjectItem:    main->loadProject(); break;
+            case saveProjectItem:    main->saveCurrentProject(); break;
+            case saveProjectAsItem:  main->saveProjectAs(); break;
+            case settingsItem:       main->showSettings(); break;
+            default: break;
+        }
+    }
+
     class MainWindow final : public juce::DocumentWindow
     {
     public:
@@ -6110,6 +6308,11 @@ private:
         void closeButtonPressed() override
         {
             juce::JUCEApplication::getInstance()->systemRequestedQuit();
+        }
+
+        MainComponent* getMainComponent() const
+        {
+            return dynamic_cast<MainComponent*> (getContentComponent());
         }
     };
 
