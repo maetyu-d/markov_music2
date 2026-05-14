@@ -26,7 +26,9 @@ public:
     int prepareData (const LaneSnapshot& lane, const juce::String& sclangPath);
     bool freezeLane (Lane& lane, const juce::String& sclangPath, double durationSeconds, const juce::File& outputFile);
     void setLaneVolume (Lane& lane);
+    void setLaneMix (Lane& lane);
     void setLaneEffectiveVolume (const Lane& lane, float volume);
+    void setLaneEffectiveMix (const Lane& lane, float volume);
     void stop (Lane& lane, double releaseSeconds = musicalReleaseSeconds);
     void transition (const std::vector<Lane*>& lanesToStop,
                      const std::vector<Lane*>& lanesToStart,
@@ -59,6 +61,7 @@ private:
                                 double releaseSeconds,
                                 double delaySeconds);
     void sendVolumeCommand (const juce::String& laneId, float volume);
+    void sendMixCommand (const juce::String& laneId, float volume, float pan);
     void sendStopCommand (const juce::String& laneId, double releaseSeconds);
     void sendStopAllCommand();
     void sendClearMachineCommand();

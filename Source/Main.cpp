@@ -4,6 +4,7 @@
 #include "SuperColliderHost.h"
 
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <future>
 #include <mutex>
@@ -1788,6 +1789,8 @@ public:
     std::function<void (int)> onSoloToggled;
     std::function<void (int)> onFreezeToggled;
     std::function<void (int, float)> onVolumeChanged;
+    std::function<void (int, float)> onGainChanged;
+    std::function<void (int, float)> onPanChanged;
 
     MixerComponent()
     {
@@ -1829,7 +1832,7 @@ public:
             rowArea.removeFromTop (3);
             for (int i = 0; i < static_cast<int> (state->lanes.size()); ++i)
             {
-                auto row = rowArea.removeFromTop (58).reduced (0, 4);
+                auto row = rowArea.removeFromTop (72).reduced (0, 4);
                 if (row.getBottom() < area.getY() || row.getY() > area.getBottom())
                     continue;
 
@@ -1854,11 +1857,23 @@ public:
             selectedIndex = i;
             auto buttons = getButtonBounds (row);
             const auto volumeArea = getVolumeBounds (row);
+            const auto gainArea = getGainBounds (row);
+            const auto panArea = getPanBounds (row);
 
             if (volumeArea.contains (event.getPosition()))
             {
                 draggingVolumeIndex = i;
                 updateVolumeFromMouse (i, event.position.x);
+            }
+            else if (gainArea.contains (event.getPosition()))
+            {
+                draggingGainIndex = i;
+                updateGainFromMouse (i, event.position.x);
+            }
+            else if (panArea.contains (event.getPosition()))
+            {
+                draggingPanIndex = i;
+                updatePanFromMouse (i, event.position.x);
             }
             else if (buttons.enabled.contains (event.getPosition()))
             {
@@ -1892,15 +1907,22 @@ public:
 
     void mouseDrag (const juce::MouseEvent& event) override
     {
-        if (state == nullptr || draggingVolumeIndex < 0)
+        if (state == nullptr)
             return;
 
-        updateVolumeFromMouse (draggingVolumeIndex, event.position.x);
+        if (draggingVolumeIndex >= 0)
+            updateVolumeFromMouse (draggingVolumeIndex, event.position.x);
+        else if (draggingGainIndex >= 0)
+            updateGainFromMouse (draggingGainIndex, event.position.x);
+        else if (draggingPanIndex >= 0)
+            updatePanFromMouse (draggingPanIndex, event.position.x);
     }
 
     void mouseUp (const juce::MouseEvent&) override
     {
         draggingVolumeIndex = -1;
+        draggingGainIndex = -1;
+        draggingPanIndex = -1;
     }
 
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& wheel) override
@@ -1971,6 +1993,8 @@ private:
 
         auto volumeArea = getVolumeBounds (row);
         const auto clipped = juce::jlimit (0.0f, 1.0f, lane.volume);
+        const auto gain = juce::jlimit (0.0f, 2.0f, lane.gain);
+        const auto pan = juce::jlimit (-1.0f, 1.0f, lane.pan);
         const auto level = meter.live ? rmsLevel : 0.0f;
         const auto peak = meter.live ? peakLevel : 0.0f;
 
@@ -1998,6 +2022,55 @@ private:
 
         g.setColour (mutedInk().withAlpha (0.18f));
         g.drawRoundedRectangle (volumeArea.toFloat(), 3.0f, 0.8f);
+
+        auto gainArea = getGainBounds (row);
+        auto panArea = getPanBounds (row);
+        drawSmallMixStrip (g, gainArea, "gain", gain / 2.0f, "x" + juce::String (gain, 2), laneColour, lane.enabled);
+        drawPanStrip (g, panArea, pan, laneColour, lane.enabled);
+    }
+
+    void drawSmallMixStrip (juce::Graphics& g, juce::Rectangle<int> area, const juce::String& label, float normalised, const juce::String& value, juce::Colour colour, bool enabled) const
+    {
+        area = area.reduced (0, 1);
+        auto labelArea = area.removeFromLeft (34);
+        auto valueArea = area.removeFromRight (34);
+        auto strip = area.reduced (0, 6);
+
+        g.setColour (mutedInk().withAlpha (enabled ? 0.64f : 0.30f));
+        g.setFont (juce::FontOptions (8.8f, juce::Font::bold));
+        g.drawText (label, labelArea, juce::Justification::centredLeft);
+        g.drawText (value, valueArea, juce::Justification::centredRight);
+
+        g.setColour (juce::Colour (0xff101318).withAlpha (enabled ? 1.0f : 0.50f));
+        g.fillRoundedRectangle (strip.toFloat(), 2.0f);
+        auto fill = strip.toFloat();
+        fill.setWidth (juce::jmax (2.0f, fill.getWidth() * juce::jlimit (0.0f, 1.0f, normalised)));
+        g.setColour (colour.withAlpha (enabled ? 0.72f : 0.22f));
+        g.fillRoundedRectangle (fill, 2.0f);
+    }
+
+    void drawPanStrip (juce::Graphics& g, juce::Rectangle<int> area, float pan, juce::Colour colour, bool enabled) const
+    {
+        area = area.reduced (0, 1);
+        auto labelArea = area.removeFromLeft (26);
+        auto valueArea = area.removeFromRight (26);
+        auto strip = area.reduced (0, 6);
+        const auto centreX = strip.getCentreX();
+        const auto panX = strip.getX() + juce::roundToInt ((pan + 1.0f) * 0.5f * static_cast<float> (strip.getWidth()));
+        const auto text = std::abs (pan) < 0.04f ? "C" : (pan < 0.0f ? "L" + juce::String (std::abs (pan), 1) : "R" + juce::String (pan, 1));
+
+        g.setColour (mutedInk().withAlpha (enabled ? 0.64f : 0.30f));
+        g.setFont (juce::FontOptions (8.8f, juce::Font::bold));
+        g.drawText ("pan", labelArea, juce::Justification::centredLeft);
+        g.drawText (text, valueArea, juce::Justification::centredRight);
+
+        g.setColour (juce::Colour (0xff101318).withAlpha (enabled ? 1.0f : 0.50f));
+        g.fillRoundedRectangle (strip.toFloat(), 2.0f);
+        g.setColour (mutedInk().withAlpha (0.26f));
+        g.drawVerticalLine (centreX, static_cast<float> (strip.getY()), static_cast<float> (strip.getBottom()));
+        g.setColour (colour.withAlpha (enabled ? 0.80f : 0.24f));
+        g.fillEllipse (static_cast<float> (juce::jlimit (strip.getX(), strip.getRight() - 1, panX)) - 3.0f,
+                       static_cast<float> (strip.getCentreY()) - 3.0f, 6.0f, 6.0f);
     }
 
     void drawToggle (juce::Graphics& g, juce::Rectangle<int> area, const juce::String& text, bool active, juce::Colour colour) const
@@ -2016,7 +2089,7 @@ private:
     {
         auto area = getRowsViewportBounds().translated (0, -juce::roundToInt (scrollOffset));
         area.removeFromTop (3);
-        return area.removeFromTop (58 * index + 58).removeFromBottom (58).reduced (0, 4);
+        return area.removeFromTop (72 * index + 72).removeFromBottom (72).reduced (0, 4);
     }
 
     juce::Rectangle<int> getRowsViewportBounds() const
@@ -2028,7 +2101,21 @@ private:
 
     juce::Rectangle<int> getVolumeBounds (juce::Rectangle<int> row) const
     {
-        return row.reduced (10, 5).removeFromBottom (17);
+        auto lower = row.reduced (10, 5).removeFromBottom (34);
+        return lower.removeFromTop (17);
+    }
+
+    juce::Rectangle<int> getGainBounds (juce::Rectangle<int> row) const
+    {
+        auto lower = row.reduced (10, 5).removeFromBottom (17);
+        return lower.removeFromLeft (lower.getWidth() / 2).reduced (0, 1);
+    }
+
+    juce::Rectangle<int> getPanBounds (juce::Rectangle<int> row) const
+    {
+        auto lower = row.reduced (10, 5).removeFromBottom (17);
+        lower.removeFromLeft (lower.getWidth() / 2);
+        return lower.reduced (5, 1);
     }
 
     ButtonBounds getButtonBounds (juce::Rectangle<int> row) const
@@ -2056,14 +2143,42 @@ private:
         repaint();
     }
 
+    void updateGainFromMouse (int index, float x)
+    {
+        if (state == nullptr || index < 0 || index >= static_cast<int> (state->lanes.size()))
+            return;
+
+        const auto gainArea = getGainBounds (getRowBounds (index));
+        const auto normalised = (x - static_cast<float> (gainArea.getX())) / static_cast<float> (juce::jmax (1, gainArea.getWidth()));
+        if (onGainChanged)
+            onGainChanged (index, juce::jlimit (0.0f, 2.0f, normalised * 2.0f));
+
+        repaint();
+    }
+
+    void updatePanFromMouse (int index, float x)
+    {
+        if (state == nullptr || index < 0 || index >= static_cast<int> (state->lanes.size()))
+            return;
+
+        const auto panArea = getPanBounds (getRowBounds (index));
+        const auto normalised = (x - static_cast<float> (panArea.getX())) / static_cast<float> (juce::jmax (1, panArea.getWidth()));
+        if (onPanChanged)
+            onPanChanged (index, juce::jlimit (-1.0f, 1.0f, normalised * 2.0f - 1.0f));
+
+        repaint();
+    }
+
     float meterToDisplay (float value) const
     {
-        return std::sqrt (juce::jlimit (0.0f, 1.0f, value * 5.0f));
+        const auto clipped = juce::jlimit (0.000001f, 1.0f, value);
+        const auto db = 20.0f * std::log10 (clipped);
+        return juce::jlimit (0.0f, 1.0f, (db + 54.0f) / 54.0f);
     }
 
     int getContentHeight() const
     {
-        return state == nullptr ? 0 : 3 + static_cast<int> (state->lanes.size()) * 58;
+        return state == nullptr ? 0 : 3 + static_cast<int> (state->lanes.size()) * 72;
     }
 
     void clampScroll()
@@ -2092,6 +2207,8 @@ private:
     State* state = nullptr;
     int selectedIndex = 0;
     int draggingVolumeIndex = -1;
+    int draggingGainIndex = -1;
+    int draggingPanIndex = -1;
     bool transportRunning = false;
     float scrollOffset = 0.0f;
 };
@@ -2525,6 +2642,7 @@ public:
         addAndMakeVisible (scriptEditor);
         addAndMakeVisible (addLaneButton);
         addAndMakeVisible (removeLaneButton);
+        addAndMakeVisible (duplicateLaneButton);
         addAndMakeVisible (moveLaneUpButton);
         addAndMakeVisible (moveLaneDownButton);
         addAndMakeVisible (addChildMachineButton);
@@ -2939,6 +3057,16 @@ public:
             setInspectorLaneVolume (newIndex, volume);
         };
 
+        mixer.onGainChanged = [this] (int newIndex, float gain)
+        {
+            setInspectorLaneGain (newIndex, gain);
+        };
+
+        mixer.onPanChanged = [this] (int newIndex, float pan)
+        {
+            setInspectorLanePan (newIndex, pan);
+        };
+
         codeDocument.addListener (this);
         scriptEditor.setLineNumbersShown (true);
         scriptEditor.setTabSize (4, true);
@@ -2976,8 +3104,9 @@ public:
 
         addLaneButton.setButtonText ("+L");
         removeLaneButton.setButtonText ("-L");
-        moveLaneUpButton.setButtonText ("Up");
-        moveLaneDownButton.setButtonText ("Down");
+        duplicateLaneButton.setButtonText ("Dup");
+        moveLaneUpButton.setButtonText ("^");
+        moveLaneDownButton.setButtonText ("v");
         addChildMachineButton.setButtonText ("+ FSM");
         removeChildMachineButton.setButtonText ("- FSM");
         playButton.setButtonText ("Play");
@@ -2995,6 +3124,11 @@ public:
             currentInspectorMachine().removeSelectedLane();
             markMachineDirty();
             refreshControls();
+        };
+
+        duplicateLaneButton.onClick = [this]
+        {
+            duplicateSelectedLane();
         };
 
         moveLaneUpButton.onClick = [this]
@@ -3320,6 +3454,7 @@ public:
         moveLaneDownButton.setVisible (showTracks);
         addLaneButton.setVisible (showTracks);
         removeLaneButton.setVisible (showTracks);
+        duplicateLaneButton.setVisible (showTracks);
         trackList.setVisible (showTracks);
         mixer.setVisible (! showTracks);
 
@@ -3329,11 +3464,12 @@ public:
             trackNameEditor.setBounds (trackNameRow.reduced (0, 2));
             auto trackHeader = trackPaneInner.removeFromTop (42);
             trackPaneTitle.setBounds (trackHeader.removeFromLeft (58).reduced (2, 4));
-            moveLaneUpButton.setBounds (trackHeader.removeFromRight (38).reduced (2, 5));
-            moveLaneDownButton.setBounds (trackHeader.removeFromRight (50).reduced (2, 5));
+            moveLaneUpButton.setBounds (trackHeader.removeFromRight (30).reduced (2, 5));
+            moveLaneDownButton.setBounds (trackHeader.removeFromRight (30).reduced (2, 5));
             trackHeader.removeFromRight (6);
             removeLaneButton.setBounds (trackHeader.removeFromRight (38).reduced (2, 5));
             addLaneButton.setBounds (trackHeader.removeFromRight (38).reduced (2, 5));
+            duplicateLaneButton.setBounds (trackHeader.removeFromRight (48).reduced (2, 5));
             trackList.setBounds (trackPaneInner.reduced (0, 4));
             mixer.setBounds ({});
         }
@@ -3345,6 +3481,7 @@ public:
             moveLaneDownButton.setBounds ({});
             addLaneButton.setBounds ({});
             removeLaneButton.setBounds ({});
+            duplicateLaneButton.setBounds ({});
             trackList.setBounds ({});
             mixer.setBounds (trackPaneInner.reduced (0, 4));
         }
@@ -3806,6 +3943,90 @@ private:
         }
     }
 
+    juce::File projectMediaFreezeDirectory (const juce::File& projectFile) const
+    {
+        return projectFile.getSiblingFile (projectFile.getFileNameWithoutExtension() + " Media")
+                          .getChildFile ("Freezes");
+    }
+
+    juce::File resolveProjectMediaFile (const juce::String& path, const juce::File& projectFile) const
+    {
+        if (path.isEmpty())
+            return {};
+
+        if (juce::File::isAbsolutePath (path))
+            return juce::File (path);
+
+        auto resolved = projectFile.getParentDirectory().getChildFile (path);
+        if (resolved.existsAsFile() || ! currentProjectFile.existsAsFile())
+            return resolved;
+
+        auto oldProjectRelative = currentProjectFile.getParentDirectory().getChildFile (path);
+        return oldProjectRelative.existsAsFile() ? oldProjectRelative : resolved;
+    }
+
+    juce::String resolveProjectMediaPathForLoad (const juce::String& path) const
+    {
+        if (path.isEmpty() || juce::File::isAbsolutePath (path))
+            return path;
+
+        const auto base = loadingProjectDirectory.isDirectory()
+            ? loadingProjectDirectory
+            : (currentProjectFile.existsAsFile() ? currentProjectFile.getParentDirectory() : juce::File());
+
+        if (base == juce::File())
+            return path;
+
+        return base.getChildFile (path).getFullPathName();
+    }
+
+    juce::String relativeMediaPathForProject (const juce::File& mediaFile, const juce::File& projectFile) const
+    {
+        return mediaFile.getRelativePathFrom (projectFile.getParentDirectory()).replaceCharacter ('\\', '/');
+    }
+
+    void bundleFrozenMediaForProject (MachineModel& model, const juce::File& projectFile)
+    {
+        auto mediaDirectory = projectMediaFreezeDirectory (projectFile);
+        mediaDirectory.createDirectory();
+
+        for (auto& state : model.states)
+        {
+            for (auto& lane : state.lanes)
+            {
+                if (! lane.frozen || lane.freezeStale || lane.frozenAudioPath.isEmpty())
+                    continue;
+
+                auto source = resolveProjectMediaFile (lane.frozenAudioPath, projectFile);
+                if (! source.existsAsFile())
+                {
+                    lane.freezeStale = true;
+                    continue;
+                }
+
+                auto safeId = lane.id.retainCharacters ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_");
+                if (safeId.isEmpty())
+                    safeId = juce::Uuid().toString().substring (0, 8);
+
+                const auto destination = mediaDirectory.getChildFile (safeId + ".wav");
+                if (source != destination)
+                {
+                    destination.deleteFile();
+                    if (! source.copyFileTo (destination))
+                    {
+                        lane.freezeStale = true;
+                        continue;
+                    }
+                }
+
+                lane.frozenAudioPath = relativeMediaPathForProject (destination, projectFile);
+            }
+
+            if (auto* child = model.childMachine (state.index))
+                bundleFrozenMediaForProject (*child, projectFile);
+        }
+    }
+
     juce::var laneToProjectVar (const Lane& lane) const
     {
         auto object = new juce::DynamicObject();
@@ -3813,6 +4034,8 @@ private:
         object->setProperty ("name", lane.name);
         object->setProperty ("script", lane.script);
         object->setProperty ("volume", lane.volume);
+        object->setProperty ("gain", lane.gain);
+        object->setProperty ("pan", lane.pan);
         object->setProperty ("enabled", lane.enabled);
         object->setProperty ("muted", lane.muted);
         object->setProperty ("solo", lane.solo);
@@ -4046,12 +4269,14 @@ private:
         lane.name = value.getProperty ("name", "Lane " + juce::String (laneIndex + 1)).toString();
         lane.script = value.getProperty ("script", MarkovDemo::defaultScriptFor (stateIndex, laneIndex)).toString();
         lane.volume = juce::jlimit (0.0f, 1.0f, static_cast<float> (static_cast<double> (value.getProperty ("volume", 1.0))));
+        lane.gain = juce::jlimit (0.0f, 2.0f, static_cast<float> (static_cast<double> (value.getProperty ("gain", 1.0))));
+        lane.pan = juce::jlimit (-1.0f, 1.0f, static_cast<float> (static_cast<double> (value.getProperty ("pan", 0.0))));
         lane.enabled = static_cast<bool> (value.getProperty ("enabled", true));
         lane.muted = static_cast<bool> (value.getProperty ("muted", false));
         lane.solo = static_cast<bool> (value.getProperty ("solo", false));
         lane.frozen = static_cast<bool> (value.getProperty ("frozen", false));
         lane.freezeStale = static_cast<bool> (value.getProperty ("freezeStale", false));
-        lane.frozenAudioPath = value.getProperty ("frozenAudioPath", {}).toString();
+        lane.frozenAudioPath = resolveProjectMediaPathForLoad (value.getProperty ("frozenAudioPath", {}).toString());
         if (lane.frozen && lane.frozenAudioPath.isNotEmpty() && ! juce::File (lane.frozenAudioPath).existsAsFile())
             lane.freezeStale = true;
         lane.playing = false;
@@ -4153,6 +4378,7 @@ private:
         host.stopAll (machine);
         runButton.setButtonText ("Run");
 
+        const juce::ScopedValueSetter<juce::File> mediaBase (loadingProjectDirectory, file.getParentDirectory());
         if (! machineFromProjectVar (machine, machineVar))
             return false;
 
@@ -4187,6 +4413,7 @@ private:
         if (file.getFileExtension().isEmpty())
             file = file.withFileExtension (".markovfsm");
 
+        bundleFrozenMediaForProject (machine, file);
         const auto text = juce::JSON::toString (makeProjectVar(), true);
         if (! file.replaceWithText (text))
             return false;
@@ -4656,7 +4883,7 @@ private:
         for (const auto& state : model.states)
         {
             for (const auto& lane : state.lanes)
-                lanes.push_back ({ lane.id, lane.name, lane.script, lane.volume, lane.frozen, lane.freezeStale, lane.frozenAudioPath });
+                lanes.push_back ({ lane.id, lane.name, lane.script, lane.volume, lane.gain, lane.pan, lane.frozen, lane.freezeStale, lane.frozenAudioPath });
 
             if (auto* child = model.childMachine (state.index))
                 collectLaneSnapshots (*child, lanes);
@@ -5113,7 +5340,7 @@ private:
 
     float effectiveLaneVolume (const State& state, const Lane& lane) const
     {
-        return shouldPlayLane (state, lane) ? juce::jlimit (0.0f, 1.0f, lane.volume) : 0.0f;
+        return shouldPlayLane (state, lane) ? juce::jlimit (0.0f, 2.0f, lane.volume * lane.gain) : 0.0f;
     }
 
     void applyMixToHostRecursive (MachineModel& model)
@@ -5121,7 +5348,7 @@ private:
         for (auto& state : model.states)
         {
             for (const auto& lane : state.lanes)
-                host.setLaneEffectiveVolume (lane, effectiveLaneVolume (state, lane));
+                host.setLaneEffectiveMix (lane, effectiveLaneVolume (state, lane));
 
             if (auto* child = model.childMachine (state.index))
                 applyMixToHostRecursive (*child);
@@ -5234,6 +5461,64 @@ private:
         refreshControls();
     }
 
+    void setInspectorLaneGain (int newIndex, float gain)
+    {
+        auto& inspected = currentInspectorMachine();
+        inspected.selectedLane = newIndex;
+        auto& lane = inspected.selectedLaneRef();
+        lane.gain = juce::jlimit (0.0f, 2.0f, gain);
+        lane.preparedBridge = -1;
+        markMachineDirty (UndoGroup::continuous);
+        applyAllMixToHost();
+        refreshControls();
+    }
+
+    void setInspectorLanePan (int newIndex, float pan)
+    {
+        auto& inspected = currentInspectorMachine();
+        inspected.selectedLane = newIndex;
+        auto& lane = inspected.selectedLaneRef();
+        lane.pan = juce::jlimit (-1.0f, 1.0f, pan);
+        lane.preparedBridge = -1;
+        markMachineDirty (UndoGroup::continuous);
+        applyAllMixToHost();
+        refreshControls();
+    }
+
+    juce::String makeUniqueLaneId (MachineModel& model, int stateIndex)
+    {
+        for (int i = 0; i < 256; ++i)
+        {
+            const auto candidate = model.makeLaneId (stateIndex, model.getLaneCount (stateIndex) + i);
+            if (findLaneById (machine, candidate) == nullptr)
+                return candidate;
+        }
+
+        return model.makeLaneId (stateIndex, model.getLaneCount (stateIndex)) + "-" + juce::Uuid().toString().substring (0, 8);
+    }
+
+    void duplicateSelectedLane()
+    {
+        auto& inspected = currentInspectorMachine();
+        auto& state = inspected.state (inspected.selectedState);
+
+        if (state.lanes.empty())
+            return;
+
+        const auto sourceIndex = juce::jlimit (0, static_cast<int> (state.lanes.size()) - 1, inspected.selectedLane);
+        auto lane = state.lanes[static_cast<size_t> (sourceIndex)];
+        lane.id = makeUniqueLaneId (inspected, inspected.selectedState);
+        lane.name = lane.name + " copy";
+        lane.playing = false;
+        lane.preparedBridge = -1;
+
+        const auto insertIndex = sourceIndex + 1;
+        state.lanes.insert (state.lanes.begin() + insertIndex, std::move (lane));
+        inspected.selectedLane = insertIndex;
+        markMachineDirty();
+        refreshControls();
+    }
+
     void refreshControls()
     {
         updateInspectorModeButtons();
@@ -5285,6 +5570,7 @@ private:
         stopAllButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff252a31).interpolatedWith (graphColour (machine.selectedState + 4), 0.12f));
         moveLaneUpButton.setEnabled (currentInspectorMachine().selectedLane > 0);
         moveLaneDownButton.setEnabled (currentInspectorMachine().selectedLane < currentInspectorMachine().getLaneCount (currentInspectorMachine().selectedState) - 1);
+        duplicateLaneButton.setEnabled (currentInspectorMachine().getLaneCount (currentInspectorMachine().selectedState) > 0);
         const auto hasChild = currentInspectorMachine().hasChildMachine (currentInspectorMachine().selectedState);
         addChildMachineButton.setEnabled (! hasChild);
         removeChildMachineButton.setEnabled (hasChild);
@@ -5379,6 +5665,7 @@ private:
     SuperColliderCodeEditor scriptEditor;
     juce::TextButton addLaneButton;
     juce::TextButton removeLaneButton;
+    juce::TextButton duplicateLaneButton;
     juce::TextButton moveLaneUpButton;
     juce::TextButton moveLaneDownButton;
     juce::TextButton addChildMachineButton;
@@ -5417,6 +5704,7 @@ private:
     std::unordered_map<std::string, LaneMeterState> laneMeters;
     std::unique_ptr<juce::FileChooser> projectChooser;
     juce::File currentProjectFile;
+    juce::File loadingProjectDirectory;
     juce::StringArray recentProjects;
     bool dirtyProject = false;
     bool loadingProjectInternally = false;

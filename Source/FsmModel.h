@@ -44,6 +44,8 @@ struct Lane
     juce::String name;
     juce::String script;
     float volume = 1.0f;
+    float gain = 1.0f;
+    float pan = 0.0f;
     bool enabled = true;
     bool muted = false;
     bool solo = false;
@@ -60,6 +62,8 @@ struct LaneSnapshot
     juce::String name;
     juce::String script;
     float volume = 1.0f;
+    float gain = 1.0f;
+    float pan = 0.0f;
     bool frozen = false;
     bool freezeStale = false;
     juce::String frozenAudioPath;

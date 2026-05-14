@@ -241,7 +241,7 @@ void SuperColliderHost::play(Lane& lane, const juce::String& sclangPath)
 
 bool SuperColliderHost::prepare(Lane& lane, const juce::String& sclangPath)
     {
-        if (prepareData ({ lane.id, lane.name, lane.script, lane.volume, lane.frozen, lane.freezeStale, lane.frozenAudioPath }, sclangPath) < 0)
+        if (prepareData ({ lane.id, lane.name, lane.script, lane.volume, lane.gain, lane.pan, lane.frozen, lane.freezeStale, lane.frozenAudioPath }, sclangPath) < 0)
             return false;
 
         lane.preparedBridge = bridgeGeneration;
@@ -259,7 +259,7 @@ int SuperColliderHost::prepareData(const LaneSnapshot& lane, const juce::String&
         if (lane.frozen && ! lane.freezeStale && lane.frozenAudioPath.isNotEmpty())
         {
             sendLoadFrozenCommand (lane.id, lane.frozenAudioPath);
-            sendVolumeCommand (lane.id, lane.volume);
+            sendMixCommand (lane.id, lane.volume * lane.gain, lane.pan);
             addLog ("Loaded frozen " + lane.name);
             setStatus ("Audio ready");
             return bridgeGeneration;
@@ -281,7 +281,7 @@ int SuperColliderHost::prepareData(const LaneSnapshot& lane, const juce::String&
         tempScripts.set (lane.id, rawFile);
 
         sendLoadCommand (lane.id, scriptFile.getFullPathName());
-        sendVolumeCommand (lane.id, lane.volume);
+        sendMixCommand (lane.id, lane.volume * lane.gain, lane.pan);
         addLog ("Loaded " + lane.name);
         setStatus ("Audio ready");
         return bridgeGeneration;
@@ -295,7 +295,7 @@ bool SuperColliderHost::freezeLane (Lane& lane, const juce::String& sclangPath, 
         if (! ensureBridgeRunningLocked (sclangPath))
             return false;
 
-        LaneSnapshot liveSnapshot { lane.id, lane.name, lane.script, lane.volume, false, false, {} };
+        LaneSnapshot liveSnapshot { lane.id, lane.name, lane.script, lane.volume, lane.gain, lane.pan, false, false, {} };
         auto script = injectLaneMetering (liveSnapshot.script, liveSnapshot.id);
         auto scriptFile = makeTempScript (liveSnapshot.id, script);
 
@@ -312,7 +312,7 @@ bool SuperColliderHost::freezeLane (Lane& lane, const juce::String& sclangPath, 
 
         outputFile.getParentDirectory().createDirectory();
         sendLoadCommand (lane.id, scriptFile.getFullPathName());
-        sendVolumeCommand (lane.id, lane.volume);
+        sendMixCommand (lane.id, lane.volume * lane.gain, lane.pan);
         sendFreezeCommand (lane.id, outputFile.getFullPathName(), durationSeconds);
         setStatus ("Freezing " + lane.name);
         addLog ("Freezing " + lane.name);
@@ -331,12 +331,34 @@ void SuperColliderHost::setLaneVolume(Lane& lane)
             sendVolumeCommand (lane.id, lane.volume);
     }
 
+void SuperColliderHost::setLaneMix(Lane& lane)
+    {
+        lane.volume = juce::jlimit (0.0f, 1.0f, lane.volume);
+        lane.gain = juce::jlimit (0.0f, 2.0f, lane.gain);
+        lane.pan = juce::jlimit (-1.0f, 1.0f, lane.pan);
+        if (! lane.playing)
+            lane.preparedBridge = -1;
+
+        const juce::ScopedLock lock (hostLock);
+
+        if (bridgeProcess != nullptr && bridgeProcess->isRunning())
+            sendMixCommand (lane.id, lane.volume * lane.gain, lane.pan);
+    }
+
 void SuperColliderHost::setLaneEffectiveVolume(const Lane& lane, float volume)
     {
         const juce::ScopedLock lock (hostLock);
 
         if (bridgeProcess != nullptr && bridgeProcess->isRunning())
             sendVolumeCommand (lane.id, juce::jlimit (0.0f, 1.0f, volume));
+    }
+
+void SuperColliderHost::setLaneEffectiveMix(const Lane& lane, float volume)
+    {
+        const juce::ScopedLock lock (hostLock);
+
+        if (bridgeProcess != nullptr && bridgeProcess->isRunning())
+            sendMixCommand (lane.id, juce::jlimit (0.0f, 2.0f, volume), lane.pan);
     }
 
 void SuperColliderHost::stop(Lane& lane, double releaseSeconds)
@@ -613,6 +635,7 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "~markovObjects = IdentityDictionary.new;\n"
                "~markovStopTokens = IdentityDictionary.new;\n"
                "~markovVolumes = IdentityDictionary.new;\n"
+               "~markovPans = IdentityDictionary.new;\n"
                "~markovPrograms = IdentityDictionary.new;\n"
                "~markovFrozenPaths = IdentityDictionary.new;\n"
                "~markovFrozenBuffers = IdentityDictionary.new;\n"
@@ -673,10 +696,10 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "    SendReply.kr(meterTrig, '/markov/laneMeter', [rms, peak], replyId);\n"
                "    Out.ar(0, sig);\n"
                "}).add;\n"
-               "SynthDef(\\markovFrozenPlayer, { |buf = 0, gate = 1, fade = 0.006, markovVol = 1, replyId = 0|\n"
+               "SynthDef(\\markovFrozenPlayer, { |buf = 0, gate = 1, fade = 0.006, markovVol = 1, markovPan = 0, replyId = 0|\n"
                "    var sig = PlayBuf.ar(2, buf, BufRateScale.kr(buf), loop: 1);\n"
                "    var env = EnvGen.kr(Env.asr(fade.max(0.001), 1, fade.max(0.001)), gate, doneAction: 2);\n"
-               "    var controlled = sig * env * Lag.kr(markovVol, 0.02);\n"
+               "    var controlled = Balance2.ar(sig[0], sig[1], Lag.kr(markovPan.clip(-1, 1), 0.02)) * env * Lag.kr(markovVol, 0.02);\n"
                "    var mono = Mix(controlled) * 0.5;\n"
                "    var meterTrig = Impulse.kr(30, 0) + Trig1.kr(1, ControlDur.ir);\n"
                "    var rms = Amplitude.kr(mono, 0.004, 0.055).clip(0, 1);\n"
@@ -699,7 +722,11 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "    id;\n"
                "};\n"
                "~markovMetered = { |key, sig|\n"
-               "    var controlled = sig * Lag.kr(\\markovVol.kr(~markovVolumes[key] ? 1), 0.02);\n"
+               "    var stereo = sig.asArray;\n"
+               "    var pan = Lag.kr(\\markovPan.kr(~markovPans[key] ? 0), 0.02).clip(-1, 1);\n"
+               "    var controlled;\n"
+               "    stereo = if (stereo.size < 2, { [stereo[0], stereo[0]] }, { [stereo[0], stereo[1]] });\n"
+               "    controlled = Balance2.ar(stereo[0], stereo[1], pan) * Lag.kr(\\markovVol.kr(~markovVolumes[key] ? 1), 0.02);\n"
                "    Out.ar(~markovLaneBusFor.(key), controlled);\n"
                "    Silent.ar(2);\n"
                "};\n"
@@ -732,10 +759,19 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "};\n"
                "~markovSetVolume = { |key, volume|\n"
                "    var obj;\n"
-               "    volume = volume.clip(0, 1);\n"
+               "    volume = volume.clip(0, 2);\n"
                "    ~markovVolumes[key] = volume;\n"
                "    obj = ~markovObjects[key];\n"
                "    if (obj.notNil and: { obj.respondsTo(\\set) }) { obj.set(\\markovVol, volume) };\n"
+               "};\n"
+               "~markovSetMix = { |key, volume, pan|\n"
+               "    var obj;\n"
+               "    volume = volume.clip(0, 2);\n"
+               "    pan = pan.clip(-1, 1);\n"
+               "    ~markovVolumes[key] = volume;\n"
+               "    ~markovPans[key] = pan;\n"
+               "    obj = ~markovObjects[key];\n"
+               "    if (obj.notNil and: { obj.respondsTo(\\set) }) { obj.set(\\markovVol, volume, \\markovPan, pan) };\n"
                "};\n"
                "~markovStop = { |key, release|\n"
                "    var obj = ~markovObjects[key];\n"
@@ -770,6 +806,7 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "    ~markovObjects = IdentityDictionary.new;\n"
                "    ~markovStopTokens = IdentityDictionary.new;\n"
                "    ~markovVolumes = IdentityDictionary.new;\n"
+               "    ~markovPans = IdentityDictionary.new;\n"
                "    ~markovFrozenPaths = IdentityDictionary.new;\n"
                "    ~markovFrozenBuffers = IdentityDictionary.new;\n"
                "    ~markovFrozenBufferPaths = IdentityDictionary.new;\n"
@@ -785,7 +822,7 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "    var buf = ~markovFrozenBuffers[key];\n"
                "    var oldPath = ~markovFrozenBufferPaths[key];\n"
                "    var makeSynth = { |loaded|\n"
-               "        var synth = Synth(\\markovFrozenPlayer, [\\buf, loaded, \\gate, 1, \\fade, ~markovAttack, \\markovVol, ~markovVolumes[key] ? 1, \\replyId, ~markovMeterIdFor.(key)]);\n"
+               "        var synth = Synth(\\markovFrozenPlayer, [\\buf, loaded, \\gate, 1, \\fade, ~markovAttack, \\markovVol, ~markovVolumes[key] ? 1, \\markovPan, ~markovPans[key] ? 0, \\replyId, ~markovMeterIdFor.(key)]);\n"
                "        ~markovObjects[key] = synth;\n"
                "        synth;\n"
                "    };\n"
@@ -808,7 +845,7 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "        var frozenPath = ~markovFrozenPaths[key];\n"
                "        if (obj.notNil) {\n"
                "            ~markovStopTokens.removeAt(key);\n"
-               "            if (obj.respondsTo(\\set)) { obj.set(\\gate, 1, \\fade, ~markovAttack, \\markovVol, ~markovVolumes[key] ? 1) };\n"
+               "            if (obj.respondsTo(\\set)) { obj.set(\\gate, 1, \\fade, ~markovAttack, \\markovVol, ~markovVolumes[key] ? 1, \\markovPan, ~markovPans[key] ? 0) };\n"
                "        } {\n"
                "            if (frozenPath.notNil) {\n"
                "                ~markovStopTokens.removeAt(key);\n"
@@ -1039,6 +1076,7 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "    ~markovTransition.(stops, plays, release, delay);\n"
                "}, '/markov/transition');\n"
                "OSCdef(\\markovVolume, { |msg| ~markovSetVolume.(msg[1].asString.asSymbol, msg[2].asFloat); }, '/markov/volume');\n"
+               "OSCdef(\\markovMix, { |msg| ~markovSetMix.(msg[1].asString.asSymbol, msg[2].asFloat, msg[3].asFloat); }, '/markov/mix');\n"
                "OSCdef(\\markovStop, { |msg| ~markovStop.(msg[1].asString.asSymbol, msg[2].asFloat); }, '/markov/stop');\n"
                "OSCdef(\\markovStopAll, { ~markovStopAll.(); }, '/markov/stopAll');\n"
                "OSCdef(\\markovPanic, { ~markovPanic.(); }, '/markov/panic');\n"
@@ -1144,6 +1182,20 @@ void SuperColliderHost::sendVolumeCommand(const juce::String& laneId, float volu
 
         if (oscConnected)
             oscSender.send ("/markov/volume", laneId, clipped);
+    }
+
+void SuperColliderHost::sendMixCommand (const juce::String& laneId, float volume, float pan)
+    {
+        const auto clippedVolume = juce::jlimit (0.0f, 2.0f, volume);
+        const auto clippedPan = juce::jlimit (-1.0f, 1.0f, pan);
+
+        if (shouldUseCommandFallback())
+            writeCommand ("~markovSetMix.(" + scSymbolLiteral (laneId) + ", "
+                          + juce::String (clippedVolume, 3) + ", "
+                          + juce::String (clippedPan, 3) + ");\n");
+
+        if (oscConnected)
+            oscSender.send ("/markov/mix", laneId, clippedVolume, clippedPan);
     }
 
 void SuperColliderHost::sendStopCommand(const juce::String& laneId, double releaseSeconds)
