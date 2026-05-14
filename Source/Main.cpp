@@ -1,45 +1,16 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 #include <juce_osc/juce_osc.h>
-
 #include "FsmModel.h"
+#include "SuperColliderHost.h"
 
 #include <chrono>
 #include <condition_variable>
+#include <future>
 #include <mutex>
 #include <thread>
 
 namespace
 {
-constexpr int superColliderLanguagePort = 57141;
-constexpr double musicalReleaseSeconds = 1.45;
-
-enum class LatencyProfile
-{
-    stable,
-    low,
-    ultra
-};
-
-constexpr auto activeLatencyProfile = LatencyProfile::low;
-constexpr bool enableHiddenCrossfades = true;
-
-struct AudioProfile
-{
-    double serverLatencySeconds = 0.004;
-    int hardwareBufferSize = 64;
-    double crossfadeSeconds = 0.006;
-};
-
-constexpr AudioProfile getAudioProfile()
-{
-    if constexpr (activeLatencyProfile == LatencyProfile::stable)
-        return { 0.015, 64, 0.010 };
-    else if constexpr (activeLatencyProfile == LatencyProfile::ultra)
-        return { 0.002, 32, 0.003 };
-    else
-        return { 0.004, 64, 0.006 };
-}
-
 juce::Colour backgroundTop() { return juce::Colour (0xff111318); }
 juce::Colour backgroundBottom() { return juce::Colour (0xff20242b); }
 juce::Colour ink() { return juce::Colour (0xfff2efe7); }
@@ -61,649 +32,7 @@ juce::Colour paletteColour (int index)
 
     return juce::Colour (colours[static_cast<size_t> (index) % std::size (colours)]);
 }
-
-juce::File makeTempScript (const juce::String& laneKey, const juce::String& source)
-{
-    auto safeKey = laneKey.retainCharacters ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_");
-    auto dir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-                   .getChildFile ("MarkovFSM")
-                   .getChildFile ("runtime")
-                   .getChildFile ("lane-scripts");
-    dir.createDirectory();
-    auto file = dir.getChildFile ("markov-fsm-" + safeKey + ".scd");
-    file.replaceWithText (source);
-    return file;
-}
-
-juce::String scStringLiteral (juce::String value)
-{
-    value = value.replace ("\\", "\\\\");
-    value = value.replace ("\"", "\\\"");
-    return "\"" + value + "\"";
-}
-
-juce::String scSymbolLiteral (juce::String value)
-{
-    value = value.replace ("\\", "\\\\");
-    value = value.replace ("'", "\\'");
-    return "'" + value + "'";
-}
-
-juce::String shellQuote (juce::String value)
-{
-    value = value.replace ("'", "'\\''");
-    return "'" + value + "'";
-}
-
-juce::File runtimeDirectory()
-{
-    auto dir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-                   .getChildFile ("MarkovFSM")
-                   .getChildFile ("runtime");
-    dir.createDirectory();
-    return dir;
-}
-
-void appendRuntimeLog (const juce::String& message)
-{
-    runtimeDirectory().getChildFile ("app.log")
-        .appendText (juce::Time::getCurrentTime().toString (true, true, true, true)
-                     + "  " + message + "\n");
-}
 } // namespace
-
-class SuperColliderHost
-{
-public:
-    std::function<void (const juce::String&)> onLogMessage;
-    std::function<void (const juce::String&)> onStatusChanged;
-
-    ~SuperColliderHost()
-    {
-        shutdown();
-    }
-
-    void play (Lane& lane, const juce::String& sclangPath)
-    {
-        appendRuntimeLog ("play requested: " + lane.id);
-        if (lane.playing)
-            stop (lane, 0.08);
-
-        if (! ensureBridgeRunning (sclangPath))
-        {
-            lane.playing = false;
-            setStatus ("Audio offline");
-            return;
-        }
-
-        if (lane.preparedBridge != bridgeGeneration && ! prepare (lane, sclangPath))
-            return;
-
-        sendPlayCommand (lane.id);
-        lane.playing = true;
-        setStatus ("Playing " + lane.name);
-    }
-
-    bool prepare (Lane& lane, const juce::String& sclangPath)
-    {
-        if (prepareData ({ lane.id, lane.name, lane.script, lane.volume }, sclangPath) < 0)
-            return false;
-
-        lane.preparedBridge = bridgeGeneration;
-        return true;
-    }
-
-    int prepareData (const LaneSnapshot& lane, const juce::String& sclangPath)
-    {
-        appendRuntimeLog ("prepare requested: " + lane.id);
-        const juce::ScopedLock lock (hostLock);
-
-        if (! ensureBridgeRunningLocked (sclangPath))
-            return -1;
-
-        auto script = lane.script;
-        script = script.replace ("vol=1", "vol=" + juce::String (juce::jlimit (0.0f, 1.0f, lane.volume), 3));
-        auto scriptFile = makeTempScript (lane.id, script);
-
-        if (auto* existing = tempScripts[lane.id])
-        {
-            existing->deleteFile();
-            tempScriptStorage.removeObject (existing, true);
-            tempScripts.remove (lane.id);
-        }
-
-        auto* rawFile = new juce::File (scriptFile);
-        tempScriptStorage.add (rawFile);
-        tempScripts.set (lane.id, rawFile);
-
-        sendLoadCommand (lane.id, scriptFile.getFullPathName());
-        sendVolumeCommand (lane.id, lane.volume);
-        addLog ("Loaded " + lane.name);
-        setStatus ("Audio ready");
-        return bridgeGeneration;
-    }
-
-    void setLaneVolume (Lane& lane)
-    {
-        lane.volume = juce::jlimit (0.0f, 1.0f, lane.volume);
-        if (! lane.playing)
-            lane.preparedBridge = -1;
-
-        const juce::ScopedLock lock (hostLock);
-
-        if (bridgeProcess != nullptr && bridgeProcess->isRunning())
-            sendVolumeCommand (lane.id, lane.volume);
-    }
-
-    void stop (Lane& lane, double releaseSeconds = musicalReleaseSeconds)
-    {
-        const juce::ScopedLock lock (hostLock);
-
-        if (bridgeProcess != nullptr && bridgeProcess->isRunning())
-            sendStopCommand (lane.id, releaseSeconds);
-
-        lane.playing = false;
-        setStatus (bridgeProcess != nullptr && bridgeProcess->isRunning() ? "Audio ready" : "Audio offline");
-    }
-
-    void stopAll (MachineModel& model)
-    {
-        const juce::ScopedLock lock (hostLock);
-
-        if (bridgeProcess != nullptr && bridgeProcess->isRunning())
-            sendStopAllCommand();
-
-        markAllLanesStopped (model);
-        addLog ("Stopped all Markov lanes");
-        setStatus (bridgeProcess != nullptr && bridgeProcess->isRunning() ? "Audio ready" : "Audio offline");
-    }
-
-    bool isReady() const
-    {
-        const juce::ScopedLock lock (hostLock);
-        return bridgeProcess != nullptr && bridgeProcess->isRunning();
-    }
-
-    int getBridgeGeneration() const
-    {
-        const juce::ScopedLock lock (hostLock);
-        return bridgeGeneration;
-    }
-
-    void panic (MachineModel& model)
-    {
-        const juce::ScopedLock lock (hostLock);
-
-        if (bridgeProcess != nullptr && bridgeProcess->isRunning())
-        {
-            if (oscConnected)
-                oscSender.send ("/markov/panic");
-
-            if (shouldUseCommandFallback())
-                writeCommand ("~markovStopAll.();\n");
-        }
-
-        markAllLanesStopped (model);
-
-        addLog ("Panic: freed all active SuperCollider lane objects");
-        setStatus (bridgeProcess != nullptr && bridgeProcess->isRunning() ? "Audio ready" : "Audio offline");
-    }
-
-    void configureMachine (const MachineModel& model)
-    {
-        juce::ignoreUnused (model);
-        addLog ("FSM prepared");
-    }
-
-    void runMachine (int startState, double rateHz)
-    {
-        juce::ignoreUnused (startState, rateHz);
-    }
-
-    void pauseMachine()
-    {
-    }
-
-    void stepMachine()
-    {
-    }
-
-    void testTone (const juce::String& sclangPath)
-    {
-        const juce::ScopedLock lock (hostLock);
-
-        if (! ensureBridgeRunningLocked (sclangPath))
-            return;
-
-        appendRuntimeLog ("test tone requested");
-        if (oscConnected)
-        {
-            oscSender.send ("/markov/test");
-            juce::Timer::callAfterDelay (650, [this]
-            {
-                const juce::ScopedLock retryLock (hostLock);
-                if (oscConnected)
-                    oscSender.send ("/markov/test");
-            });
-        }
-        else
-            writeCommand ("~markovTest.();\n");
-
-        addLog ("Test tone requested");
-    }
-
-private:
-    bool ensureBridgeRunning (const juce::String& sclangPath)
-    {
-        const juce::ScopedLock lock (hostLock);
-        return ensureBridgeRunningLocked (sclangPath);
-    }
-
-    bool ensureBridgeRunningLocked (const juce::String& sclangPath)
-    {
-        const auto executable = resolveSclangExecutable (sclangPath);
-
-        if (bridgeProcess != nullptr && bridgeProcess->isRunning() && executable == currentExecutable)
-            return true;
-
-        shutdown();
-        setStatus ("Booting audio");
-        addLog ("Starting SuperCollider bridge: " + executable);
-        appendRuntimeLog ("starting bridge: " + executable);
-
-        currentExecutable = executable;
-        bridgeDirectory = runtimeDirectory().getChildFile ("sc-bridge");
-        bridgeDirectory.deleteRecursively();
-        commandDirectory = bridgeDirectory.getChildFile ("commands");
-        bridgeDirectory.createDirectory();
-        commandDirectory.createDirectory();
-
-        auto bridgeScript = bridgeDirectory.getChildFile ("bridge.scd");
-        bridgeScript.replaceWithText (makeBridgeScript());
-        bridgeLogFile = bridgeDirectory.getChildFile ("sclang.log");
-
-        auto process = std::make_unique<juce::ChildProcess>();
-        juce::StringArray args;
-        args.add ("/bin/sh");
-        args.add ("-c");
-        args.add ("exec " + shellQuote (currentExecutable)
-                  + " -D -u " + juce::String (superColliderLanguagePort)
-                  + " " + shellQuote (bridgeScript.getFullPathName())
-                  + " >> " + shellQuote (bridgeLogFile.getFullPathName()) + " 2>&1");
-
-        if (! process->start (args))
-        {
-            addLog ("Could not start sclang at: " + executable);
-            appendRuntimeLog ("could not start bridge");
-            setStatus ("SC start failed");
-            return false;
-        }
-
-        bridgeProcess = std::move (process);
-        oscConnected = oscSender.connect ("127.0.0.1", superColliderLanguagePort);
-        ++bridgeGeneration;
-        bridgeStartedAtMs = juce::Time::currentTimeMillis();
-        setStatus (oscConnected ? "Audio bridge online" : "Audio bridge booting");
-        addLog ("Bridge log: " + bridgeLogFile.getFullPathName());
-        appendRuntimeLog ("bridge started; log: " + bridgeLogFile.getFullPathName());
-        return true;
-    }
-
-    juce::String resolveSclangExecutable (const juce::String& sclangPath) const
-    {
-        if (sclangPath.trim().isNotEmpty())
-            return sclangPath.trim();
-
-        auto bundledMacPath = juce::File ("/Applications/SuperCollider.app/Contents/MacOS/sclang");
-        if (bundledMacPath.existsAsFile())
-            return bundledMacPath.getFullPathName();
-
-        return "sclang";
-    }
-
-    juce::String makeBridgeScript() const
-    {
-        const auto commandPath = scStringLiteral (commandDirectory.getFullPathName());
-        constexpr auto profile = getAudioProfile();
-        const auto latency = juce::String (profile.serverLatencySeconds, 4);
-        const auto bufferSize = juce::String (profile.hardwareBufferSize);
-        const auto crossfade = juce::String (enableHiddenCrossfades ? profile.crossfadeSeconds : 0.0, 4);
-        const auto defaultRelease = juce::String (musicalReleaseSeconds, 3);
-        const auto attack = juce::String (0.120, 3);
-
-        return "(\n"
-               "Server.default.latency = " + latency + ";\n"
-               "s.options.hardwareBufferSize = " + bufferSize + ";\n"
-               "s.options.numOutputBusChannels = 2;\n"
-               "s.options.memSize = 262144;\n"
-               "s.boot;\n"
-               "~markovFade = " + crossfade + ";\n"
-               "~markovAttack = " + attack + ";\n"
-               "~markovRelease = " + defaultRelease + ";\n"
-               "~markovServerReady = false;\n"
-               "~markovPending = List.new;\n"
-               "~markovWhenReady = { |func|\n"
-               "    if (~markovServerReady) {\n"
-               "        func.value;\n"
-               "    } {\n"
-               "        ~markovPending.add(func);\n"
-               "        s.waitForBoot {\n"
-               "            ~markovServerReady = true;\n"
-               "            ~markovPending.do { |pending| pending.value };\n"
-               "            ~markovPending.clear;\n"
-               "        };\n"
-               "    };\n"
-               "};\n"
-               "~markovObjects = IdentityDictionary.new;\n"
-               "~markovStopTokens = IdentityDictionary.new;\n"
-               "~markovVolumes = IdentityDictionary.new;\n"
-               "~markovPrograms = IdentityDictionary.new;\n"
-               "~markovLoad = { |key, path|\n"
-               "    var file, source;\n"
-               "    file = File(path, \"r\");\n"
-               "    if (file.isOpen.not) { (\"Markov could not open lane: \" ++ path).warn; ^nil };\n"
-               "    source = file.readAllString;\n"
-               "    file.close;\n"
-               "    ~markovPrograms[key] = (\"{ \" ++ source ++ \" }\").interpret;\n"
-               "};\n"
-               "~markovStartMaster = {\n"
-               "    if (~markovMaster.notNil) { ~markovMaster.free };\n"
-               "    ~markovMaster = {\n"
-               "        var in = In.ar(0, 2);\n"
-               "        var low = HPF.ar(LeakDC.ar(in), 30);\n"
-               "        var controlled = Compander.ar(low * 0.95, low, 0.24, 1, 0.30, 0.004, 0.20);\n"
-               "        ReplaceOut.ar(0, Limiter.ar(controlled.tanh * 0.78, 0.58, 0.018));\n"
-               "    }.play(s, addAction: \\addToTail);\n"
-               "};\n"
-               "~markovSetVolume = { |key, volume|\n"
-               "    var obj;\n"
-               "    volume = volume.clip(0, 1);\n"
-               "    ~markovVolumes[key] = volume;\n"
-               "    obj = ~markovObjects[key];\n"
-               "    if (obj.notNil and: { obj.respondsTo(\\set) }) { obj.set(\\vol, volume) };\n"
-               "};\n"
-               "~markovStop = { |key, release|\n"
-               "    var obj = ~markovObjects[key];\n"
-               "    var token;\n"
-               "    release = release ? ~markovRelease;\n"
-               "    if (obj.notNil) {\n"
-               "        if (obj.respondsTo(\\set)) {\n"
-               "            token = (~markovStopTokens[key] ? 0) + 1;\n"
-               "            ~markovStopTokens[key] = token;\n"
-               "            obj.set(\\gate, 0, \\fade, release);\n"
-               "            SystemClock.sched(release + 0.12, {\n"
-               "                if ((~markovObjects[key] === obj) and: { ~markovStopTokens[key] == token }) {\n"
-               "                    ~markovObjects.removeAt(key);\n"
-               "                    ~markovStopTokens.removeAt(key);\n"
-               "                    if (obj.respondsTo(\\free)) { obj.free };\n"
-               "                };\n"
-               "                nil;\n"
-               "            });\n"
-               "        } {\n"
-               "            if (obj.respondsTo(\\run)) { obj.run(false) } {\n"
-               "                if (obj.respondsTo(\\stop)) { obj.stop };\n"
-               "            };\n"
-               "            ~markovObjects.removeAt(key);\n"
-               "        };\n"
-               "    };\n"
-               "};\n"
-               "~markovStopAll = {\n"
-               "    ~markovObjects.keys.copy.do { |key| ~markovStop.(key, 0.025) };\n"
-               "};\n"
-               "~markovPanic = {\n"
-               "    s.freeAll;\n"
-               "    ~markovObjects = IdentityDictionary.new;\n"
-               "    ~markovStopTokens = IdentityDictionary.new;\n"
-               "    ~markovVolumes = IdentityDictionary.new;\n"
-               "    SystemClock.sched(0.05, { ~markovStartMaster.(); nil });\n"
-               "};\n"
-               "~markovWhenReady.({ ~markovStartMaster.(); });\n"
-               "~markovPlay = { |key|\n"
-               "    ~markovWhenReady.({\n"
-               "        var obj = ~markovObjects[key];\n"
-               "        var program = ~markovPrograms[key];\n"
-               "        if (obj.notNil) {\n"
-               "            ~markovStopTokens.removeAt(key);\n"
-               "            if (obj.respondsTo(\\set)) { obj.set(\\gate, 1, \\fade, ~markovAttack, \\vol, ~markovVolumes[key] ? 1) };\n"
-               "        } {\n"
-               "            if (program.notNil) {\n"
-               "                ~markovStopTokens.removeAt(key);\n"
-               "                ~markovObjects[key] = program.value;\n"
-               "            };\n"
-               "        };\n"
-               "    });\n"
-               "};\n"
-               "OSCdef(\\markovLoad, { |msg| ~markovLoad.(msg[1].asString.asSymbol, msg[2].asString); }, '/markov/load');\n"
-               "OSCdef(\\markovPlay, { |msg| ~markovPlay.(msg[1].asString.asSymbol); }, '/markov/play');\n"
-               "OSCdef(\\markovVolume, { |msg| ~markovSetVolume.(msg[1].asString.asSymbol, msg[2].asFloat); }, '/markov/volume');\n"
-               "OSCdef(\\markovStop, { |msg| ~markovStop.(msg[1].asString.asSymbol, msg[2].asFloat); }, '/markov/stop');\n"
-               "OSCdef(\\markovStopAll, { ~markovStopAll.(); }, '/markov/stopAll');\n"
-               "OSCdef(\\markovPanic, { ~markovPanic.(); }, '/markov/panic');\n"
-               "OSCdef(\\markovQuit, { ~markovPanic.(); s.quit; SystemClock.sched(0.18, { 0.exit; nil }); }, '/markov/quit');\n"
-               "~markovTest = { ~markovWhenReady.({ { SinOsc.ar(660 ! 2) * EnvGen.kr(Env.perc(0.01, 1.8), doneAction: 2) * 0.18 }.play; }); };\n"
-               "OSCdef(\\markovTest, { ~markovTest.(); }, '/markov/test');\n"
-               "~markovPollCommands = {\n"
-               "    var dir = PathName(" + commandPath + ");\n"
-               "    dir.files.sort({ |a, b| a.fileName < b.fileName }).do { |file|\n"
-               "        if (file.extension == \"scd\") {\n"
-               "            var commandFile = File(file.fullPath, \"r\");\n"
-               "            var command = commandFile.readAllString;\n"
-               "            commandFile.close;\n"
-               "            command.interpret;\n"
-               "            File.delete(file.fullPath);\n"
-               "        };\n"
-               "    };\n"
-               "    0.012;\n"
-               "};\n"
-               "SystemClock.sched(0.012, ~markovPollCommands);\n"
-               ")\n";
-    }
-
-    void sendLoadCommand (const juce::String& laneId, const juce::String& scriptPath)
-    {
-        if (shouldUseCommandFallback())
-            writeCommand ("~markovLoad.(" + scSymbolLiteral (laneId) + ", " + scStringLiteral (scriptPath) + ");\n");
-
-        if (oscConnected)
-            oscSender.send ("/markov/load", laneId, scriptPath);
-    }
-
-    void sendPlayCommand (const juce::String& laneId)
-    {
-        if (shouldUseCommandFallback())
-            writeCommand ("~markovPlay.(" + scSymbolLiteral (laneId) + ");\n");
-
-        if (oscConnected)
-            oscSender.send ("/markov/play", laneId);
-    }
-
-    void sendVolumeCommand (const juce::String& laneId, float volume)
-    {
-        const auto clipped = juce::jlimit (0.0f, 1.0f, volume);
-
-        if (shouldUseCommandFallback())
-            writeCommand ("~markovSetVolume.(" + scSymbolLiteral (laneId) + ", " + juce::String (clipped, 3) + ");\n");
-
-        if (oscConnected)
-            oscSender.send ("/markov/volume", laneId, clipped);
-    }
-
-    void sendStopCommand (const juce::String& laneId, double releaseSeconds)
-    {
-        if (shouldUseCommandFallback())
-            writeCommand ("~markovStop.(" + scSymbolLiteral (laneId) + ", " + juce::String (releaseSeconds, 3) + ");\n");
-
-        if (oscConnected)
-            oscSender.send ("/markov/stop", laneId, static_cast<float> (releaseSeconds));
-    }
-
-    void sendStopAllCommand()
-    {
-        if (shouldUseCommandFallback())
-            writeCommand ("~markovStopAll.();\n");
-
-        if (oscConnected)
-            oscSender.send ("/markov/stopAll");
-    }
-
-    void sendClearMachineCommand()
-    {
-        if (shouldUseCommandFallback())
-            writeCommand ("~markovClearMachine.();\n");
-
-        if (oscConnected)
-            oscSender.send ("/markov/clear");
-    }
-
-    bool shouldUseCommandFallback() const
-    {
-        return ! oscConnected || juce::Time::currentTimeMillis() - bridgeStartedAtMs < 1800;
-    }
-
-    void writeCommand (const juce::String& command)
-    {
-        if (! commandDirectory.exists())
-            return;
-
-        auto serial = juce::String (++commandSerial).paddedLeft ('0', 8);
-        auto file = commandDirectory.getChildFile ("command-"
-                    + juce::String::toHexString (juce::Time::currentTimeMillis())
-                    + "-" + serial + ".scd");
-        file.replaceWithText (command);
-    }
-
-    void shutdown()
-    {
-        logReaderShouldRun = false;
-        if (logReader.joinable())
-        {
-            if (logReader.get_id() != std::this_thread::get_id())
-                logReader.join();
-            else
-                logReader.detach();
-        }
-
-        if (bridgeProcess != nullptr)
-        {
-            if (oscConnected)
-            {
-                oscSender.send ("/markov/panic");
-                oscSender.send ("/markov/quit");
-                oscSender.disconnect();
-                oscConnected = false;
-            }
-
-            writeCommand ("~markovPanic.(); s.quit; SystemClock.sched(0.18, { 0.exit; nil });\n");
-            juce::Thread::sleep (260);
-
-            if (bridgeProcess->isRunning())
-                bridgeProcess->kill();
-
-            bridgeProcess = nullptr;
-        }
-
-        tempScriptStorage.clear (true);
-        tempScripts.clear();
-
-        // Keep the bridge folder around so sclang.log is available after failures.
-
-        setStatus ("Audio offline");
-    }
-
-    static void markAllLanesStopped (MachineModel& model)
-    {
-        for (auto& state : model.states)
-        {
-            for (auto& lane : state.lanes)
-                lane.playing = false;
-
-            if (auto* child = model.childMachine (state.index))
-                markAllLanesStopped (*child);
-        }
-    }
-
-    void startLogReader()
-    {
-        logReaderShouldRun = false;
-        if (logReader.joinable())
-            logReader.join();
-
-        logReaderShouldRun = true;
-        logReader = std::thread ([this]
-        {
-            while (logReaderShouldRun)
-            {
-                {
-                    const juce::ScopedLock lock (hostLock);
-
-                    if (bridgeProcess == nullptr)
-                        break;
-
-                    char buffer[4096] {};
-                    auto bytesRead = bridgeProcess->readProcessOutput (buffer, static_cast<int> (sizeof (buffer) - 1));
-                    if (bytesRead > 0)
-                    {
-                        buffer[bytesRead] = 0;
-                        addLog (juce::String::fromUTF8 (buffer, bytesRead).trimEnd());
-                    }
-
-                    if (bridgeProcess != nullptr && ! bridgeProcess->isRunning())
-                    {
-                        addLog ("SuperCollider bridge exited");
-                        bridgeProcess = nullptr;
-                        oscConnected = false;
-                        setStatus ("Audio offline");
-                        break;
-                    }
-                }
-
-                juce::Thread::sleep (40);
-            }
-        });
-    }
-
-    void addLog (const juce::String& message)
-    {
-        if (message.trim().isEmpty())
-            return;
-
-        if (onLogMessage)
-            juce::MessageManager::callAsync ([callback = onLogMessage, message]
-            {
-                callback (message);
-            });
-    }
-
-    void setStatus (const juce::String& status)
-    {
-        if (currentStatus == status)
-            return;
-
-        currentStatus = status;
-        if (onStatusChanged)
-            juce::MessageManager::callAsync ([callback = onStatusChanged, status]
-            {
-                callback (status);
-            });
-    }
-
-    mutable juce::CriticalSection hostLock;
-    std::unique_ptr<juce::ChildProcess> bridgeProcess;
-    juce::OSCSender oscSender;
-    juce::File bridgeDirectory;
-    juce::File commandDirectory;
-    juce::File bridgeLogFile;
-    juce::String currentExecutable;
-    int commandSerial = 0;
-    int bridgeGeneration = 0;
-    juce::int64 bridgeStartedAtMs = 0;
-    bool oscConnected = false;
-    std::atomic<bool> logReaderShouldRun { false };
-    std::thread logReader;
-    juce::String currentStatus { "Audio offline" };
-    juce::OwnedArray<juce::File> tempScriptStorage;
-    juce::HashMap<juce::String, juce::File*> tempScripts;
-};
 
 class GraphComponent final : public juce::Component,
                              private juce::Timer
@@ -733,6 +62,7 @@ public:
         if (machine != &machineToUse)
         {
             manualNodeOffsets.clear();
+            clearNodePositionLock();
             fitView();
         }
 
@@ -752,7 +82,39 @@ public:
         finishNestedStateCountEdit (false);
         ensureManualOffsetSize();
         std::fill (manualNodeOffsets.begin(), manualNodeOffsets.end(), juce::Point<float> {});
+        clearNodePositionLock();
         fitView();
+    }
+
+    void beginNodePositionLock()
+    {
+        finishNestedStateCountEdit (false);
+        nodePositionLockActive = false;
+        layoutStatesNormal (true, true);
+        lockedScreenPositions = statePositions;
+        lockedScreenRadius = stateRadius;
+        nodePositionLockActive = ! lockedScreenPositions.empty();
+    }
+
+    void endNodePositionLock()
+    {
+        if (! nodePositionLockActive)
+            return;
+
+        auto lockedPositions = lockedScreenPositions;
+        clearNodePositionLock();
+
+        layoutStatesNormal (false, false);
+        auto basePositions = statePositions;
+        ensureManualOffsetSize();
+
+        const auto count = juce::jmin (static_cast<int> (basePositions.size()),
+                                       static_cast<int> (lockedPositions.size()));
+        for (int i = 0; i < count; ++i)
+            manualNodeOffsets[static_cast<size_t> (i)] = screenToGraph (lockedPositions[static_cast<size_t> (i)])
+                                                       - basePositions[static_cast<size_t> (i)];
+
+        repaint();
     }
 
     bool keyPressed (const juce::KeyPress& key) override
@@ -928,6 +290,18 @@ public:
 private:
     void layoutStates()
     {
+        if (nodePositionLockActive && lockedScreenPositions.size() == static_cast<size_t> (machine->getStateCount()))
+        {
+            statePositions = lockedScreenPositions;
+            stateRadius = lockedScreenRadius;
+            return;
+        }
+
+        layoutStatesNormal (true, true);
+    }
+
+    void layoutStatesNormal (bool includeManualOffsets, bool applyViewTransform)
+    {
         const auto count = machine->getStateCount();
         statePositions.resize (static_cast<size_t> (count));
         ensureManualOffsetSize();
@@ -954,8 +328,17 @@ private:
         }
 
         relaxStatePositions (area);
-        applyManualNodeOffsets();
-        applyViewTransformToLayout();
+        if (includeManualOffsets)
+            applyManualNodeOffsets();
+
+        if (applyViewTransform)
+            applyViewTransformToLayout();
+    }
+
+    void clearNodePositionLock()
+    {
+        nodePositionLockActive = false;
+        lockedScreenPositions.clear();
     }
 
     void ensureManualOffsetSize()
@@ -1057,7 +440,7 @@ private:
             auto from = fromCentre + direction * (stateRadius * 1.05f);
             auto to = toCentre - direction * (stateRadius * 1.05f);
             auto mid = (from + to) * 0.5f;
-            auto centre = getLocalBounds().toFloat().getCentre();
+            auto centre = getStatePositionCentre();
             auto control = mid + (mid - centre) * 0.18f;
 
             juce::Path curve;
@@ -1071,6 +454,18 @@ private:
             g.setColour (accentB().withAlpha (0.72f));
             g.fillEllipse (arrowPoint.x - 3.0f, arrowPoint.y - 3.0f, 6.0f, 6.0f);
         }
+    }
+
+    juce::Point<float> getStatePositionCentre() const
+    {
+        if (statePositions.empty())
+            return getLocalBounds().toFloat().getCentre();
+
+        juce::Point<float> centre;
+        for (const auto& position : statePositions)
+            centre += position;
+
+        return centre / static_cast<float> (statePositions.size());
     }
 
     void drawStates (juce::Graphics& g)
@@ -1495,8 +890,10 @@ private:
     MachineModel* machine;
     MachineModel* inspectedMachine = nullptr;
     std::vector<juce::Point<float>> statePositions;
+    std::vector<juce::Point<float>> lockedScreenPositions;
     std::unique_ptr<juce::TextEditor> nestedCountEditor;
     float stateRadius = 48.0f;
+    float lockedScreenRadius = 48.0f;
     float zoom = 1.0f;
     juce::Point<float> panOffset;
     juce::Point<float> dragStart;
@@ -1505,6 +902,7 @@ private:
     juce::Point<float> nodeOffsetStart;
     int draggingStateIndex = -1;
     bool draggedState = false;
+    bool nodePositionLockActive = false;
     int editingNestedParentState = -1;
     int editingSecondLayerChildState = -1;
 
@@ -2002,6 +1400,7 @@ public:
 
     std::function<void()> onDragStarted;
     std::function<void (int)> onDragged;
+    std::function<void()> onDragEnded;
 
     explicit PaneDivider (Orientation orientationToUse = Orientation::vertical) : orientation (orientationToUse)
     {
@@ -2037,6 +1436,9 @@ public:
 
     void mouseUp (const juce::MouseEvent&) override
     {
+        if (onDragEnded)
+            onDragEnded();
+
         repaint();
     }
 
@@ -2044,10 +1446,315 @@ private:
     Orientation orientation = Orientation::vertical;
 };
 
-class MainComponent final : public juce::Component
+class SuperColliderTokeniser final : public juce::CodeTokeniser
 {
 public:
-    MainComponent() : graph (machine), rules (machine)
+    enum TokenType
+    {
+        error = 0,
+        comment,
+        keyword,
+        ugen,
+        identifier,
+        number,
+        string,
+        symbol,
+        bracket,
+        punctuation,
+        op
+    };
+
+    int readNextToken (juce::CodeDocument::Iterator& source) override
+    {
+        source.skipWhitespace();
+
+        const auto first = source.peekNextChar();
+        if (first == 0)
+            return identifier;
+
+        if (first == '/' && source.peekPreviousChar() != '\\')
+        {
+            source.skip();
+            if (source.peekNextChar() == '/')
+            {
+                source.skipToEndOfLine();
+                return comment;
+            }
+
+            return op;
+        }
+
+        if (first == '"')
+        {
+            source.skip();
+            while (! source.isEOF())
+            {
+                const auto c = source.nextChar();
+                if (c == '\\')
+                    source.skip();
+                else if (c == '"')
+                    break;
+            }
+            return string;
+        }
+
+        if (first == '\\')
+        {
+            source.skip();
+            while (isIdentifierBody (source.peekNextChar()))
+                source.skip();
+            return symbol;
+        }
+
+        if (juce::CharacterFunctions::isDigit (first))
+        {
+            bool seenDot = false;
+            while (juce::CharacterFunctions::isDigit (source.peekNextChar()) || (! seenDot && source.peekNextChar() == '.'))
+            {
+                seenDot = seenDot || source.peekNextChar() == '.';
+                source.skip();
+            }
+            return number;
+        }
+
+        if (isIdentifierStart (first))
+        {
+            juce::String token;
+            while (isIdentifierBody (source.peekNextChar()))
+                token << juce::String::charToString (source.nextChar());
+
+            if (isKeyword (token))
+                return keyword;
+            if (isUGen (token))
+                return ugen;
+            return identifier;
+        }
+
+        if (isBracket (first))
+        {
+            source.skip();
+            return bracket;
+        }
+
+        if (juce::String (";,.").containsChar (first))
+        {
+            source.skip();
+            return punctuation;
+        }
+
+        source.skip();
+        return op;
+    }
+
+    juce::CodeEditorComponent::ColourScheme getDefaultColourScheme() override
+    {
+        juce::CodeEditorComponent::ColourScheme scheme;
+        scheme.set ("Error",       juce::Colour (0xffff5c77));
+        scheme.set ("Comment",     juce::Colour (0xff68737d));
+        scheme.set ("Keyword",     juce::Colour (0xffffc857));
+        scheme.set ("UGen",        juce::Colour (0xff52d1dc));
+        scheme.set ("Identifier",  ink());
+        scheme.set ("Number",      juce::Colour (0xff7bd88f));
+        scheme.set ("String",      juce::Colour (0xfff76f8e));
+        scheme.set ("Symbol",      juce::Colour (0xffb48cff));
+        scheme.set ("Bracket",     juce::Colour (0xfff2efe7));
+        scheme.set ("Punctuation", juce::Colour (0xffaeb5bd));
+        scheme.set ("Operator",    juce::Colour (0xffff9f68));
+        return scheme;
+    }
+
+private:
+    static bool isIdentifierStart (juce::juce_wchar c)
+    {
+        return juce::CharacterFunctions::isLetter (c) || c == '_' || c == '~';
+    }
+
+    static bool isIdentifierBody (juce::juce_wchar c)
+    {
+        return isIdentifierStart (c) || juce::CharacterFunctions::isDigit (c);
+    }
+
+    static bool isBracket (juce::juce_wchar c)
+    {
+        return c == '(' || c == ')' || c == '{' || c == '}' || c == '[' || c == ']';
+    }
+
+    static bool isKeyword (const juce::String& token)
+    {
+        static const char* keywords[] =
+        {
+            "arg", "var", "classvar", "const", "this", "super", "nil", "true", "false",
+            "if", "while", "for", "case", "switch", "do", "collect", "select", "reject",
+            "inf", "pi"
+        };
+
+        for (auto* keyword : keywords)
+            if (token == keyword)
+                return true;
+
+        return false;
+    }
+
+    static bool isUGen (const juce::String& token)
+    {
+        static const char* ugens[] =
+        {
+            "SinOsc", "LFTri", "LFSaw", "VarSaw", "Pulse", "Saw", "WhiteNoise", "PinkNoise",
+            "Impulse", "Demand", "Dseq", "Dwhite", "Drand", "Env", "EnvGen", "Decay2",
+            "Lag", "TRand", "LFNoise0", "LFNoise1", "RLPF", "LPF", "HPF", "BPF",
+            "Limiter", "LeakDC", "Compander", "Pan2", "Splay", "CombC", "Mix",
+            "In", "ReplaceOut", "Out", "SendReply", "Amplitude", "Silent"
+        };
+
+        for (auto* ugenName : ugens)
+            if (token == ugenName)
+                return true;
+
+        return false;
+    }
+};
+
+class SuperColliderCodeEditor final : public juce::CodeEditorComponent,
+                                      private juce::Timer
+{
+public:
+    SuperColliderCodeEditor (juce::CodeDocument& document, juce::CodeTokeniser* tokeniser)
+        : juce::CodeEditorComponent (document, tokeniser)
+    {
+        startTimerHz (20);
+    }
+
+    void paintOverChildren (juce::Graphics& g) override
+    {
+        drawCurrentLine (g);
+        drawBracketMatch (g);
+    }
+
+    void caretPositionMoved() override
+    {
+        repaint();
+    }
+
+private:
+    void timerCallback() override
+    {
+        repaint();
+    }
+
+    void drawCurrentLine (juce::Graphics& g)
+    {
+        const auto caret = getCaretPos();
+        const auto bounds = getCharacterBounds ({ getDocument(), caret.getLineNumber(), 0 });
+        if (bounds.isEmpty())
+            return;
+
+        g.setColour (accentB().withAlpha (0.055f));
+        g.fillRect (juce::Rectangle<int> (0, bounds.getY(), getWidth(), getLineHeight()));
+    }
+
+    void drawBracketMatch (juce::Graphics& g)
+    {
+        const auto text = getDocument().getAllContent();
+        if (text.isEmpty())
+            return;
+
+        const auto caretIndex = getCaretPosition();
+        const auto bracketIndex = findBracketNearCaret (text, caretIndex);
+        if (bracketIndex < 0)
+            return;
+
+        const auto matchIndex = findMatchingBracket (text, bracketIndex);
+        drawBracketBox (g, bracketIndex, matchIndex >= 0 ? accentA() : accentC());
+
+        if (matchIndex >= 0)
+            drawBracketBox (g, matchIndex, accentA());
+    }
+
+    int findBracketNearCaret (const juce::String& text, int caretIndex) const
+    {
+        if (caretIndex > 0 && isBracket (text[caretIndex - 1]))
+            return caretIndex - 1;
+
+        if (caretIndex < text.length() && isBracket (text[caretIndex]))
+            return caretIndex;
+
+        return -1;
+    }
+
+    int findMatchingBracket (const juce::String& text, int bracketIndex) const
+    {
+        const auto open = text[bracketIndex];
+        const auto close = matchingBracket (open);
+        if (close == 0)
+            return -1;
+
+        const auto direction = isOpeningBracket (open) ? 1 : -1;
+        const auto targetOpen = direction > 0 ? open : close;
+        const auto targetClose = direction > 0 ? close : open;
+        int depth = 0;
+
+        for (int i = bracketIndex; i >= 0 && i < text.length(); i += direction)
+        {
+            const auto c = text[i];
+            if (c == targetOpen)
+                ++depth;
+            else if (c == targetClose)
+            {
+                --depth;
+                if (depth == 0)
+                    return i;
+            }
+        }
+
+        return -1;
+    }
+
+    void drawBracketBox (juce::Graphics& g, int index, juce::Colour colour)
+    {
+        auto bounds = getCharacterBounds ({ getDocument(), index }).toFloat().expanded (1.5f, 1.0f);
+        if (bounds.isEmpty())
+            return;
+
+        g.setColour (colour.withAlpha (0.18f));
+        g.fillRoundedRectangle (bounds, 2.0f);
+        g.setColour (colour.withAlpha (0.90f));
+        g.drawRoundedRectangle (bounds, 2.0f, 1.1f);
+    }
+
+    static bool isBracket (juce::juce_wchar c)
+    {
+        return c == '(' || c == ')' || c == '{' || c == '}' || c == '[' || c == ']';
+    }
+
+    static bool isOpeningBracket (juce::juce_wchar c)
+    {
+        return c == '(' || c == '{' || c == '[';
+    }
+
+    static juce::juce_wchar matchingBracket (juce::juce_wchar c)
+    {
+        switch (c)
+        {
+            case '(': return ')';
+            case '{': return '}';
+            case '[': return ']';
+            case ')': return '(';
+            case '}': return '{';
+            case ']': return '[';
+            default: break;
+        }
+
+        return 0;
+    }
+};
+
+class MainComponent final : public juce::Component,
+                            private juce::CodeDocument::Listener,
+                            private juce::OSCReceiver,
+                            private juce::OSCReceiver::ListenerWithOSCAddress<juce::OSCReceiver::MessageLoopCallback>
+{
+public:
+    MainComponent() : graph (machine), rules (machine), scriptEditor (codeDocument, &scTokeniser)
     {
         setSize (1180, 760);
 
@@ -2073,6 +1780,12 @@ public:
         addAndMakeVisible (stateTabs);
         addAndMakeVisible (breadcrumbLabel);
         addAndMakeVisible (stateSummaryLabel);
+        addAndMakeVisible (stateTempoLabel);
+        addAndMakeVisible (stateTempoEditor);
+        addAndMakeVisible (stateMeterLabel);
+        addAndMakeVisible (stateMeterBeatsEditor);
+        addAndMakeVisible (stateMeterSlashLabel);
+        addAndMakeVisible (stateMeterUnitEditor);
         addAndMakeVisible (nestedTimingLabel);
         addAndMakeVisible (nestedModeBox);
         addAndMakeVisible (nestedDivisionLabel);
@@ -2083,6 +1796,13 @@ public:
         addAndMakeVisible (trackNameEditor);
         addAndMakeVisible (trackList);
         addAndMakeVisible (codePaneTitle);
+        addAndMakeVisible (codeStatsLabel);
+        addAndMakeVisible (codeCheckLabel);
+        addAndMakeVisible (checkCodeButton);
+        addAndMakeVisible (codeFontDownButton);
+        addAndMakeVisible (codeFontUpButton);
+        addAndMakeVisible (tidyCodeButton);
+        addAndMakeVisible (expandCodeButton);
         addAndMakeVisible (scriptEditor);
         addAndMakeVisible (addLaneButton);
         addAndMakeVisible (removeLaneButton);
@@ -2105,6 +1825,27 @@ public:
         stateSummaryLabel.setFont (juce::FontOptions (13.0f, juce::Font::bold));
         stateSummaryLabel.setColour (juce::Label::textColourId, ink());
         stateSummaryLabel.setJustificationType (juce::Justification::centredLeft);
+
+        stateTempoLabel.setText ("Tempo", juce::dontSendNotification);
+        stateTempoLabel.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+        stateTempoLabel.setColour (juce::Label::textColourId, mutedInk());
+        stateMeterLabel.setText ("Meter", juce::dontSendNotification);
+        stateMeterLabel.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+        stateMeterLabel.setColour (juce::Label::textColourId, mutedInk());
+        stateMeterSlashLabel.setText ("/", juce::dontSendNotification);
+        stateMeterSlashLabel.setFont (juce::FontOptions (15.0f, juce::Font::bold));
+        stateMeterSlashLabel.setColour (juce::Label::textColourId, mutedInk());
+        stateMeterSlashLabel.setJustificationType (juce::Justification::centred);
+
+        configureSmallNumberEditor (stateTempoEditor, 6, "0123456789.");
+        configureSmallNumberEditor (stateMeterBeatsEditor, 2, "0123456789");
+        configureSmallNumberEditor (stateMeterUnitEditor, 2, "0123456789");
+        stateTempoEditor.onReturnKey = [this] { commitStateTimingEditors(); };
+        stateTempoEditor.onFocusLost = [this] { commitStateTimingEditors(); };
+        stateMeterBeatsEditor.onReturnKey = [this] { commitStateTimingEditors(); };
+        stateMeterBeatsEditor.onFocusLost = [this] { commitStateTimingEditors(); };
+        stateMeterUnitEditor.onReturnKey = [this] { commitStateTimingEditors(); };
+        stateMeterUnitEditor.onFocusLost = [this] { commitStateTimingEditors(); };
 
         nestedTimingLabel.setText ("Nested timing", juce::dontSendNotification);
         nestedTimingLabel.setFont (juce::FontOptions (12.5f, juce::Font::bold));
@@ -2148,6 +1889,13 @@ public:
         codePaneTitle.setFont (juce::FontOptions (13.5f, juce::Font::bold));
         codePaneTitle.setColour (juce::Label::textColourId, ink());
         codePaneTitle.setJustificationType (juce::Justification::centredLeft);
+        codeStatsLabel.setFont (juce::FontOptions (11.5f));
+        codeStatsLabel.setColour (juce::Label::textColourId, mutedInk());
+        codeStatsLabel.setJustificationType (juce::Justification::centredRight);
+        codeCheckLabel.setText ("Not checked", juce::dontSendNotification);
+        codeCheckLabel.setFont (juce::FontOptions (11.5f, juce::Font::bold));
+        codeCheckLabel.setColour (juce::Label::textColourId, mutedInk());
+        codeCheckLabel.setJustificationType (juce::Justification::centredLeft);
 
         trackPaneTitle.setText ("Tracks", juce::dontSendNotification);
         trackPaneTitle.setFont (juce::FontOptions (13.5f, juce::Font::bold));
@@ -2207,6 +1955,11 @@ public:
         {
             bottomPaneUserSized = true;
             dividerDragStartBottomHeight = bottomPaneHeight;
+            graph.beginNodePositionLock();
+        };
+        graphBottomDivider.onDragEnded = [this]
+        {
+            graph.endNodePositionLock();
         };
 
         logButton.setButtonText ("Log");
@@ -2230,8 +1983,14 @@ public:
 
         host.onLogMessage = [this] (const juce::String& message)
         {
+            handleHostLogMessage (message);
             appendLog (message);
         };
+
+        if (connect (57142))
+            addListener (this, "/markov/state");
+        else
+            appendLog ("Could not bind visual state OSC port 57142");
 
         topStateCountLabel.setText ("Top states", juce::dontSendNotification);
         topStateCountLabel.setFont (juce::FontOptions (12.5f, juce::Font::bold));
@@ -2280,14 +2039,15 @@ public:
             {
                 fsmRunning = false;
                 stopTransport();
-                stopMachineRecursive (machine);
+                host.pauseMachine();
+                host.stopAll (machine);
                 runButton.setButtonText ("Run FSM");
             }
         };
 
         stepButton.onClick = [this]
         {
-            advanceStateVisualOnly();
+            host.stepMachine();
         };
 
         stopAllButton.onClick = [this]
@@ -2295,6 +2055,7 @@ public:
             fsmRunning = false;
             stopTransport();
             runButton.setButtonText ("Run FSM");
+            host.pauseMachine();
             host.stopAll (machine);
             refreshControls();
         };
@@ -2303,7 +2064,7 @@ public:
         {
             fsmRunning = false;
             stopTransport();
-            stopMachineRecursive (machine);
+            host.pauseMachine();
             runButton.setButtonText ("Run FSM");
             host.panic (machine);
             refreshControls();
@@ -2318,6 +2079,7 @@ public:
 
         rateSlider.onValueChange = [this]
         {
+            transportIntervalMs = getTransportIntervalMs();
             if (fsmRunning)
             {
                 restartTransport();
@@ -2381,17 +2143,47 @@ public:
             refreshControls();
         };
 
-        scriptEditor.setMultiLine (true);
-        scriptEditor.setReturnKeyStartsNewLine (true);
-        scriptEditor.setFont (juce::FontOptions (15.0f, juce::Font::plain));
-        scriptEditor.setColour (juce::TextEditor::backgroundColourId, juce::Colour (0xff0f1116));
-        scriptEditor.setColour (juce::TextEditor::textColourId, ink());
-        scriptEditor.setColour (juce::TextEditor::outlineColourId, juce::Colour (0xff242a32));
-        scriptEditor.onTextChange = [this]
+        codeDocument.addListener (this);
+        scriptEditor.setLineNumbersShown (true);
+        scriptEditor.setTabSize (4, true);
+        scriptEditor.setScrollbarThickness (9);
+        updateCodeEditorFont();
+        scriptEditor.setColour (juce::CodeEditorComponent::backgroundColourId, juce::Colour (0xff0f1116));
+        scriptEditor.setColour (juce::CodeEditorComponent::defaultTextColourId, ink());
+        scriptEditor.setColour (juce::CodeEditorComponent::highlightColourId, accentB().withAlpha (0.24f));
+        scriptEditor.setColour (juce::CodeEditorComponent::lineNumberBackgroundId, juce::Colour (0xff111820));
+        scriptEditor.setColour (juce::CodeEditorComponent::lineNumberTextId, mutedInk().withAlpha (0.52f));
+        scriptEditor.setColourScheme (scTokeniser.getDefaultColourScheme());
+
+        codeFontDownButton.setButtonText ("A-");
+        codeFontUpButton.setButtonText ("A+");
+        tidyCodeButton.setButtonText ("Tidy");
+        checkCodeButton.setButtonText ("Check");
+        expandCodeButton.setButtonText ("Expand");
+        codeFontDownButton.onClick = [this]
         {
-            currentInspectorMachine().selectedLaneRef().script = scriptEditor.getText();
-            currentInspectorMachine().selectedLaneRef().preparedBridge = -1;
-            markMachineDirty();
+            codeFontSize = juce::jlimit (11.0f, 20.0f, codeFontSize - 1.0f);
+            updateCodeEditorFont();
+        };
+        codeFontUpButton.onClick = [this]
+        {
+            codeFontSize = juce::jlimit (11.0f, 20.0f, codeFontSize + 1.0f);
+            updateCodeEditorFont();
+        };
+        tidyCodeButton.onClick = [this]
+        {
+            tidySelectedLaneScript();
+        };
+        checkCodeButton.onClick = [this]
+        {
+            checkSelectedLaneScript();
+        };
+        expandCodeButton.onClick = [this]
+        {
+            codeExpanded = ! codeExpanded;
+            expandCodeButton.setButtonText (codeExpanded ? "Shrink" : "Expand");
+            resized();
+            scriptEditor.grabKeyboardFocus();
         };
 
         addLaneButton.setButtonText ("+ Lane");
@@ -2582,6 +2374,9 @@ public:
 
     ~MainComponent() override
     {
+        codeDocument.removeListener (this);
+        removeListener (this);
+        disconnect();
         stopTransport();
         stopMachineRecursive (machine);
         host.onLogMessage = nullptr;
@@ -2617,12 +2412,20 @@ public:
         statusLabel.setBounds (header.reduced (8, 8));
 
         const auto horizontalDividerHeight = 8;
-        const auto minGraphHeight = 230;
-        const auto minBottomHeight = 170;
+        const auto minGraphHeight = codeExpanded ? 112 : 230;
+        const auto minBottomHeight = codeExpanded ? 320 : 170;
         const auto maxBottomHeight = juce::jmax (minBottomHeight, area.getHeight() - 36 - minGraphHeight - horizontalDividerHeight);
-        if (! bottomPaneUserSized)
-            bottomPaneHeight = juce::jlimit (240, 330, juce::roundToInt (static_cast<float> (area.getHeight()) * 0.30f));
-        bottomPaneHeight = juce::jlimit (minBottomHeight, maxBottomHeight, bottomPaneHeight);
+        if (codeExpanded)
+        {
+            bottomPaneHeight = juce::jlimit (minBottomHeight, maxBottomHeight,
+                                             juce::roundToInt (static_cast<float> (area.getHeight()) * 0.58f));
+        }
+        else
+        {
+            if (! bottomPaneUserSized)
+                bottomPaneHeight = juce::jlimit (240, 330, juce::roundToInt (static_cast<float> (area.getHeight()) * 0.30f));
+            bottomPaneHeight = juce::jlimit (minBottomHeight, maxBottomHeight, bottomPaneHeight);
+        }
 
         const auto dividerWidth = 8;
         const auto minWorkspace = 760;
@@ -2638,10 +2441,12 @@ public:
 
         auto lower = workspace.removeFromBottom (bottomPaneHeight).reduced (0, 8);
         graphBottomDivider.setBounds (workspace.removeFromBottom (horizontalDividerHeight).reduced (0, 1));
-        const auto minRules = 300;
+        const auto minRules = codeExpanded ? 190 : 300;
         const auto minCode = 440;
         const auto maxRules = juce::jmax (minRules, lower.getWidth() - minCode - dividerWidth);
-        if (! rulesPaneUserSized)
+        if (codeExpanded)
+            rulesPaneWidth = juce::roundToInt (static_cast<float> (lower.getWidth()) * 0.26f);
+        else if (! rulesPaneUserSized)
             rulesPaneWidth = juce::roundToInt (static_cast<float> (lower.getWidth()) * 0.43f);
         rulesPaneWidth = juce::jlimit (minRules, maxRules, rulesPaneWidth);
 
@@ -2656,6 +2461,15 @@ public:
         auto trackPaneInner = tracksPane.reduced (10, 8);
         breadcrumbLabel.setBounds (trackPaneInner.removeFromTop (22).reduced (2, 0));
         stateSummaryLabel.setBounds (trackPaneInner.removeFromTop (28).reduced (2, 0));
+        auto stateTimingRow = trackPaneInner.removeFromTop (34);
+        stateTempoLabel.setBounds (stateTimingRow.removeFromLeft (54).reduced (2, 4));
+        stateTempoEditor.setBounds (stateTimingRow.removeFromLeft (66).reduced (2, 4));
+        stateTimingRow.removeFromLeft (8);
+        stateMeterLabel.setBounds (stateTimingRow.removeFromLeft (48).reduced (2, 4));
+        stateMeterBeatsEditor.setBounds (stateTimingRow.removeFromLeft (36).reduced (2, 4));
+        stateMeterSlashLabel.setBounds (stateTimingRow.removeFromLeft (14).reduced (0, 4));
+        stateMeterUnitEditor.setBounds (stateTimingRow.removeFromLeft (36).reduced (2, 4));
+        trackPaneInner.removeFromTop (4);
         auto timingRow = trackPaneInner.removeFromTop (34);
         nestedTimingLabel.setBounds (timingRow.removeFromLeft (96).reduced (2, 4));
         nestedModeBox.setBounds (timingRow.reduced (2, 4));
@@ -2679,9 +2493,16 @@ public:
         auto codePaneInner = codePane.reduced (8, 0);
         auto codeHeader = codePaneInner.removeFromTop (34);
         codePaneTitle.setBounds (codeHeader.removeFromLeft (74).reduced (3));
+        codeStatsLabel.setBounds (codeHeader.removeFromRight (132).reduced (3));
+        codeFontUpButton.setBounds (codeHeader.removeFromRight (42).reduced (3));
+        codeFontDownButton.setBounds (codeHeader.removeFromRight (42).reduced (3));
+        tidyCodeButton.setBounds (codeHeader.removeFromRight (58).reduced (3));
+        expandCodeButton.setBounds (codeHeader.removeFromRight (72).reduced (3));
+        codeCheckLabel.setBounds (codeHeader.removeFromRight (codeExpanded ? 280 : 170).reduced (3));
         addChildMachineButton.setBounds (codeHeader.removeFromLeft (64).reduced (3));
         enterChildMachineButton.setBounds (codeHeader.removeFromLeft (58).reduced (3));
         exitChildMachineButton.setBounds (codeHeader.removeFromLeft (54).reduced (3));
+        checkCodeButton.setBounds (codeHeader.removeFromLeft (66).reduced (3));
         playButton.setBounds (codeHeader.removeFromLeft (64).reduced (3));
         stopButton.setBounds (codeHeader.removeFromLeft (64).reduced (3));
         scriptEditor.setBounds (codePaneInner.reduced (0, 6));
@@ -2695,6 +2516,295 @@ public:
     }
 
 private:
+    void configureSmallNumberEditor (juce::TextEditor& editor, int maxChars, const juce::String& allowedChars)
+    {
+        editor.setInputRestrictions (maxChars, allowedChars);
+        editor.setJustification (juce::Justification::centred);
+        editor.setMultiLine (false);
+        editor.setSelectAllWhenFocused (true);
+        editor.setColour (juce::TextEditor::backgroundColourId, juce::Colour (0xff111318));
+        editor.setColour (juce::TextEditor::textColourId, ink());
+        editor.setColour (juce::TextEditor::outlineColourId, juce::Colour (0xff34414a));
+        editor.setColour (juce::TextEditor::focusedOutlineColourId, accentA());
+    }
+
+    void updateCodeEditorFont()
+    {
+        scriptEditor.setFont (juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(), codeFontSize, juce::Font::plain)));
+    }
+
+    void updateCodeStats()
+    {
+        const auto text = codeDocument.getAllContent();
+        const auto lineCount = codeDocument.getNumLines();
+        const auto caret = scriptEditor.getCaretPos();
+
+        codeStatsLabel.setText ("Ln " + juce::String (caret.getLineNumber() + 1)
+                                + ", Col " + juce::String (caret.getIndexInLine() + 1)
+                                + "  ·  " + juce::String (lineCount) + " lines"
+                                + "  ·  " + juce::String (text.length()) + " chars",
+                                juce::dontSendNotification);
+    }
+
+    void setCodeCheckStatus (const juce::String& text, juce::Colour colour)
+    {
+        codeCheckLabel.setText (text, juce::dontSendNotification);
+        codeCheckLabel.setColour (juce::Label::textColourId, colour);
+    }
+
+    void checkSelectedLaneScript()
+    {
+        const auto checkId = host.checkScript (codeDocument.getAllContent(), getSclangPathOverride());
+        if (checkId.isEmpty())
+        {
+            pendingCheckId.clear();
+            setCodeCheckStatus ("Check failed: audio offline", accentC());
+            return;
+        }
+
+        pendingCheckId = checkId;
+        setCodeCheckStatus ("Checking...", accentA());
+        pollCheckResult (checkId, 0);
+    }
+
+    void pollCheckResult (juce::String checkId, int attempt)
+    {
+        juce::Timer::callAfterDelay (120, [safeThis = juce::Component::SafePointer<MainComponent> (this), checkId, attempt]
+        {
+            if (safeThis == nullptr || safeThis->pendingCheckId != checkId)
+                return;
+
+            const auto result = safeThis->host.readCheckResult (checkId);
+            if (result.isNotEmpty())
+            {
+                safeThis->handleCheckResultText (checkId, result);
+                return;
+            }
+
+            if (attempt < 60)
+                safeThis->pollCheckResult (checkId, attempt + 1);
+            else
+            {
+                safeThis->pendingCheckId.clear();
+                safeThis->setCodeCheckStatus ("Check timed out", accentC());
+            }
+        });
+    }
+
+    void handleCheckResultText (const juce::String& checkId, const juce::String& result)
+    {
+        if (pendingCheckId != checkId)
+            return;
+
+        pendingCheckId.clear();
+
+        if (result.startsWith ("OK"))
+        {
+            setCodeCheckStatus ("OK", juce::Colour (0xff7bd88f));
+            scriptEditor.deselectAll();
+            return;
+        }
+
+        auto errorText = result.fromFirstOccurrenceOf ("ERROR", false, false).trim();
+        if (errorText.isEmpty())
+            errorText = "SuperCollider reported an error";
+
+        auto line = extractErrorLineNumber (errorText);
+        if (line <= 0)
+            line = scriptEditor.getCaretPos().getLineNumber() + 1;
+
+        highlightCodeLine (line);
+
+        setCodeCheckStatus ("Error" + (line > 0 ? " line " + juce::String (line) : "") + ": " + errorText.upToFirstOccurrenceOf ("\n", false, false),
+                            accentC());
+    }
+
+    void handleHostLogMessage (const juce::String& message)
+    {
+        handleSchedulerStateMessage (message);
+
+        if (pendingCheckId.isEmpty())
+            return;
+
+        const auto okMarker = "MARKOV_CHECK_OK " + pendingCheckId;
+        const auto errorMarker = "MARKOV_CHECK_ERROR " + pendingCheckId;
+
+        if (message.contains (okMarker))
+        {
+            pendingCheckId.clear();
+            setCodeCheckStatus ("OK", juce::Colour (0xff7bd88f));
+            scriptEditor.deselectAll();
+            return;
+        }
+
+        const auto errorIndex = message.indexOf (errorMarker);
+        if (errorIndex >= 0)
+        {
+            auto errorText = message.substring (errorIndex + errorMarker.length()).trim();
+            if (errorText.isEmpty())
+                errorText = "SuperCollider reported an error";
+
+            pendingCheckId.clear();
+            auto line = extractErrorLineNumber (message);
+            if (line <= 0)
+                line = scriptEditor.getCaretPos().getLineNumber() + 1;
+
+            highlightCodeLine (line);
+
+            setCodeCheckStatus ("Error" + (line > 0 ? " line " + juce::String (line) : "") + ": " + errorText.upToFirstOccurrenceOf ("\n", false, false),
+                                accentC());
+        }
+    }
+
+    void handleSchedulerStateMessage (const juce::String& message)
+    {
+        const auto marker = "MARKOV_STATE ";
+        const auto markerIndex = message.indexOf (marker);
+        if (markerIndex < 0)
+            return;
+
+        auto payload = message.substring (markerIndex + juce::String (marker).length()).trim();
+        auto parts = juce::StringArray::fromTokens (payload, " \t\r\n", "");
+        if (parts.size() < 2 || parts[0] != machine.machineId)
+            return;
+
+        applySchedulerState (parts[0], parts[1].getIntValue());
+    }
+
+    void oscMessageReceived (const juce::OSCMessage& message) override
+    {
+        if (message.size() < 2 || ! message[0].isString())
+            return;
+
+        auto machineId = message[0].getString();
+        auto stateIndex = -1;
+
+        if (message[1].isInt32())
+            stateIndex = message[1].getInt32();
+        else if (message[1].isFloat32())
+            stateIndex = static_cast<int> (message[1].getFloat32());
+        else if (message[1].isString())
+            stateIndex = message[1].getString().getIntValue();
+
+        applySchedulerState (machineId, stateIndex);
+    }
+
+    void applySchedulerState (const juce::String& machineId, int stateIndex)
+    {
+        if (machineId != machine.machineId)
+            return;
+
+        if (stateIndex < 0 || stateIndex >= machine.getStateCount())
+            return;
+
+        machine.selectedState = stateIndex;
+        machine.selectedLane = juce::jlimit (0, machine.getLaneCount (stateIndex) - 1, 0);
+        refreshControls();
+    }
+
+    int extractErrorLineNumber (const juce::String& text) const
+    {
+        const auto lower = text.toLowerCase();
+        auto index = lower.indexOf ("line ");
+        if (index < 0)
+            index = lower.indexOf ("line:");
+
+        if (index < 0)
+            return -1;
+
+        index += 4;
+        while (index < text.length() && ! juce::CharacterFunctions::isDigit (text[index]))
+            ++index;
+
+        juce::String digits;
+        while (index < text.length() && juce::CharacterFunctions::isDigit (text[index]))
+            digits << juce::String::charToString (text[index++]);
+
+        return digits.getIntValue();
+    }
+
+    void highlightCodeLine (int oneBasedLine)
+    {
+        const auto line = juce::jlimit (0, codeDocument.getNumLines() - 1, oneBasedLine - 1);
+        const juce::CodeDocument::Position start (codeDocument, line, 0);
+        const juce::CodeDocument::Position end (codeDocument, line, codeDocument.getLine (line).length());
+        scriptEditor.selectRegion (start, end);
+        scriptEditor.scrollToLine (juce::jmax (0, line - 2));
+    }
+
+    juce::String tidyScriptText (const juce::String& source) const
+    {
+        juce::StringArray lines;
+        lines.addLines (source);
+
+        juce::StringArray tidied;
+        int indent = 0;
+
+        for (auto line : lines)
+        {
+            auto trimmed = line.trim();
+            if (trimmed.isEmpty())
+            {
+                tidied.add ({});
+                continue;
+            }
+
+            if (trimmed.startsWithChar ('}') || trimmed.startsWithChar (')') || trimmed.startsWithChar (']'))
+                indent = juce::jmax (0, indent - 1);
+
+            tidied.add (juce::String::repeatedString ("    ", indent) + trimmed);
+
+            const auto opensBlock = trimmed.endsWithChar ('{')
+                                  || trimmed.endsWithChar ('(')
+                                  || trimmed.endsWithChar ('[')
+                                  || trimmed.endsWith ("|");
+            const auto closesBlock = trimmed.endsWithChar ('}')
+                                  || trimmed.endsWithChar (')')
+                                  || trimmed.endsWithChar (']');
+
+            if (opensBlock && ! closesBlock)
+                ++indent;
+        }
+
+        return tidied.joinIntoString ("\n") + "\n";
+    }
+
+    void tidySelectedLaneScript()
+    {
+        auto& lane = currentInspectorMachine().selectedLaneRef();
+        const auto tidied = tidyScriptText (codeDocument.getAllContent());
+        lane.script = tidied;
+        lane.preparedBridge = -1;
+        loadingCodeDocument = true;
+        scriptEditor.loadContent (tidied);
+        loadingCodeDocument = false;
+        updateCodeStats();
+        markMachineDirty();
+    }
+
+    void codeDocumentTextInserted (const juce::String&, int) override
+    {
+        codeDocumentChanged();
+    }
+
+    void codeDocumentTextDeleted (int, int) override
+    {
+        codeDocumentChanged();
+    }
+
+    void codeDocumentChanged()
+    {
+        if (loadingCodeDocument)
+            return;
+
+        currentInspectorMachine().selectedLaneRef().script = codeDocument.getAllContent();
+        currentInspectorMachine().selectedLaneRef().preparedBridge = -1;
+        if (pendingCheckId.isEmpty())
+            setCodeCheckStatus ("Modified", mutedInk());
+        updateCodeStats();
+        markMachineDirty();
+    }
+
     MachineModel& currentMachine() const
     {
         return *activeMachine;
@@ -2746,6 +2856,8 @@ private:
         auto activeText = (&inspected == activeMachine) ? "active" : "inspecting";
         const auto nestedText = inspected.hasChildMachine (inspected.selectedState) ? "nested FSM" : "no nested FSM";
         return s.name + "  ·  " + juce::String (laneCount) + (laneCount == 1 ? " track" : " tracks")
+             + "  ·  " + juce::String (s.tempoBpm, 1) + " BPM"
+             + "  ·  " + juce::String (s.beatsPerBar) + "/" + juce::String (s.beatUnit)
              + "  ·  " + activeText + "  ·  " + nestedText;
     }
 
@@ -2774,6 +2886,21 @@ private:
             markMachineDirty();
             refreshControls();
         }
+    }
+
+    void commitStateTimingEditors()
+    {
+        auto& inspected = currentInspectorMachine();
+        auto& state = inspected.state (inspected.selectedState);
+        auto bpm = stateTempoEditor.getText().getDoubleValue();
+        auto beats = stateMeterBeatsEditor.getText().getIntValue();
+        auto unit = stateMeterUnitEditor.getText().getIntValue();
+
+        state.tempoBpm = juce::jlimit (20.0, 320.0, bpm <= 0.0 ? state.tempoBpm : bpm);
+        state.beatsPerBar = juce::jlimit (1, 32, beats <= 0 ? state.beatsPerBar : beats);
+        state.beatUnit = juce::jlimit (1, 32, unit <= 0 ? state.beatUnit : unit);
+        transportIntervalMs = getTransportIntervalMs();
+        refreshControls();
     }
 
     void setActiveMachine (MachineModel& newMachine)
@@ -2864,8 +2991,9 @@ private:
     void startPreparedRun()
     {
         runButton.setButtonText ("Pause");
-        startMachine (machine, machine.selectedState);
-        startTransport();
+        stopTransport();
+        host.configureMachine (machine);
+        host.runMachine (machine.selectedState, rateSlider.getValue());
         refreshControls();
     }
 
@@ -2944,30 +3072,42 @@ private:
 
     int getTransportIntervalMs() const
     {
-        return juce::jlimit (80, 5000, static_cast<int> (1000.0 / getTransportRateHz()));
+        const auto& state = machine.state (machine.selectedState);
+        const auto rate = juce::jmax (0.05, rateSlider.getValue());
+        return juce::jlimit (80, 120000, static_cast<int> (state.secondsPerBar() * 1000.0 / rate));
     }
 
     double getTransportRateHz() const
     {
-        return juce::jmax (0.1, rateSlider.getValue() * 2.0);
+        return 1000.0 / static_cast<double> (getTransportIntervalMs());
+    }
+
+    int getTransportLookaheadMs() const
+    {
+        return juce::jlimit (30, 180, transportIntervalMs.load() / 3);
     }
 
     void startTransport()
     {
         stopTransport();
         transportShouldRun = true;
+        ++transportCallbackGeneration;
 
         auto safeThis = juce::Component::SafePointer<MainComponent> (this);
-        auto intervalMs = getTransportIntervalMs();
-        transportThread = std::thread ([safeThis, intervalMs]
+        transportIntervalMs = getTransportIntervalMs();
+        transportThread = std::thread ([safeThis]
         {
-            auto nextTick = std::chrono::steady_clock::now() + std::chrono::milliseconds (intervalMs);
+            auto nextTick = std::chrono::steady_clock::now()
+                          + std::chrono::milliseconds (safeThis != nullptr ? safeThis->transportIntervalMs.load() : 1000);
 
             while (safeThis != nullptr && safeThis->transportShouldRun)
             {
+                const auto lookaheadMs = safeThis != nullptr ? safeThis->getTransportLookaheadMs() : 40;
+                const auto scheduleTime = nextTick - std::chrono::milliseconds (lookaheadMs);
+
                 {
                     std::unique_lock<std::mutex> lock (safeThis->transportMutex);
-                    if (safeThis->transportCv.wait_until (lock, nextTick, [safeThis]
+                    if (safeThis->transportCv.wait_until (lock, scheduleTime, [safeThis]
                     {
                         return safeThis == nullptr || ! safeThis->transportShouldRun.load();
                     }))
@@ -2976,16 +3116,41 @@ private:
                     }
                 }
 
-                nextTick += std::chrono::milliseconds (intervalMs);
-
                 if (safeThis == nullptr || ! safeThis->transportShouldRun)
                     break;
 
-                juce::MessageManager::callAsync ([safeThis]
+                auto result = std::make_shared<std::promise<int>>();
+                auto future = result->get_future();
+                const auto tickId = ++safeThis->transportCallbackGeneration;
+                const auto targetTick = nextTick;
+
+                juce::MessageManager::callAsync ([safeThis, result, tickId, targetTick]
                 {
-                    if (safeThis != nullptr && safeThis->transportShouldRun)
-                        safeThis->advanceStateVisualOnly();
+                    auto nextInterval = safeThis != nullptr ? safeThis->transportIntervalMs.load() : 1000;
+
+                    if (safeThis != nullptr
+                        && safeThis->transportShouldRun
+                        && safeThis->transportCallbackGeneration.load() == tickId)
+                    {
+                        const auto remaining = std::chrono::duration_cast<std::chrono::microseconds> (targetTick - std::chrono::steady_clock::now()).count();
+                        const auto delaySeconds = juce::jlimit (0.0, 0.5, static_cast<double> (remaining) / 1000000.0);
+                        nextInterval = safeThis->advanceStateVisualOnly (delaySeconds);
+                    }
+
+                    result->set_value (nextInterval);
                 });
+
+                auto nextInterval = safeThis->transportIntervalMs.load();
+                if (future.wait_for (std::chrono::milliseconds (750)) == std::future_status::ready)
+                    nextInterval = future.get();
+
+                if (safeThis != nullptr)
+                    safeThis->transportIntervalMs = nextInterval;
+                nextTick += std::chrono::milliseconds (nextInterval);
+
+                const auto now = std::chrono::steady_clock::now();
+                if (nextTick <= now)
+                    nextTick = now + std::chrono::milliseconds (nextInterval);
             }
         });
     }
@@ -2993,6 +3158,7 @@ private:
     void stopTransport()
     {
         transportShouldRun = false;
+        ++transportCallbackGeneration;
         transportCv.notify_all();
         if (transportThread.joinable())
         {
@@ -3032,10 +3198,15 @@ private:
             host.stop (lane);
     }
 
-    void advanceStateVisualOnly()
+    int advanceStateVisualOnly (double audioDelaySeconds = 0.0)
     {
+        scheduledTransitionDelaySeconds = audioDelaySeconds;
         advanceMachineTree (machine);
+        scheduledTransitionDelaySeconds = 0.0;
+        const auto nextInterval = getTransportIntervalMs();
+        transportIntervalMs = nextInterval;
         refreshControls();
+        return nextInterval;
     }
 
     int chooseNextState (const MachineModel& model) const
@@ -3112,14 +3283,17 @@ private:
             return;
         }
 
+        std::vector<Lane*> lanesToStop;
+        std::vector<Lane*> lanesToStart;
+
         if (changingState && previousState >= 0 && previousState < model.getStateCount())
         {
             for (auto& lane : model.state (previousState).lanes)
-                host.stop (lane);
+                lanesToStop.push_back (&lane);
 
             if (auto* child = model.childMachine (previousState))
                 if (child->timingMode != NestedTimingMode::latch)
-                    stopMachineRecursive (*child);
+                    collectStopMachineRecursive (*child, lanesToStop);
         }
 
         model.selectedState = stateIndex;
@@ -3128,7 +3302,9 @@ private:
         auto& state = model.state (stateIndex);
         for (auto& lane : state.lanes)
             if (shouldPlayLane (state, lane))
-                host.play (lane, getSclangPathOverride());
+                lanesToStart.push_back (&lane);
+
+        host.transition (lanesToStop, lanesToStart, getSclangPathOverride(), musicalReleaseSeconds, scheduledTransitionDelaySeconds);
 
         if (auto* child = model.childMachine (stateIndex))
             startChildMachineForParentState (*child);
@@ -3198,6 +3374,21 @@ private:
         }
     }
 
+    void collectStopMachineRecursive (MachineModel& model, std::vector<Lane*>& lanesToStop)
+    {
+        model.latchedActive = false;
+        model.oneShotComplete = false;
+
+        for (auto& state : model.states)
+        {
+            for (auto& lane : state.lanes)
+                lanesToStop.push_back (&lane);
+
+            if (auto* child = model.childMachine (state.index))
+                collectStopMachineRecursive (*child, lanesToStop);
+        }
+    }
+
     bool shouldPlayLane (const State& state, const Lane& lane) const
     {
         if (! lane.enabled || lane.muted)
@@ -3217,10 +3408,20 @@ private:
         refreshTrackList();
         rules.setMachine (currentInspectorMachine());
 
-        scriptEditor.setText (currentInspectorMachine().selectedLaneRef().script, juce::dontSendNotification);
+        if (! scriptEditor.hasKeyboardFocus (true) || codeDocument.getAllContent() != currentInspectorMachine().selectedLaneRef().script)
+        {
+            loadingCodeDocument = true;
+            scriptEditor.loadContent (currentInspectorMachine().selectedLaneRef().script);
+            loadingCodeDocument = false;
+        }
+        updateCodeStats();
         trackNameEditor.setText (currentInspectorMachine().selectedLaneRef().name, false);
         breadcrumbLabel.setText (makeBreadcrumb(), juce::dontSendNotification);
         stateSummaryLabel.setText (makeStateSummary(), juce::dontSendNotification);
+        const auto& inspectedState = currentInspectorMachine().state (currentInspectorMachine().selectedState);
+        stateTempoEditor.setText (juce::String (inspectedState.tempoBpm, 1), false);
+        stateMeterBeatsEditor.setText (juce::String (inspectedState.beatsPerBar), false);
+        stateMeterUnitEditor.setText (juce::String (inspectedState.beatUnit), false);
         if (auto* child = selectedNestedMachine())
         {
             nestedModeBox.setEnabled (true);
@@ -3296,6 +3497,12 @@ private:
     PillBar stateTabs;
     juce::Label breadcrumbLabel;
     juce::Label stateSummaryLabel;
+    juce::Label stateTempoLabel;
+    juce::TextEditor stateTempoEditor;
+    juce::Label stateMeterLabel;
+    juce::TextEditor stateMeterBeatsEditor;
+    juce::Label stateMeterSlashLabel;
+    juce::TextEditor stateMeterUnitEditor;
     juce::Label nestedTimingLabel;
     juce::ComboBox nestedModeBox;
     juce::Label nestedDivisionLabel;
@@ -3306,7 +3513,16 @@ private:
     juce::TextEditor trackNameEditor;
     TrackListComponent trackList;
     juce::Label codePaneTitle;
-    juce::TextEditor scriptEditor;
+    juce::Label codeStatsLabel;
+    juce::Label codeCheckLabel;
+    juce::TextButton checkCodeButton;
+    juce::TextButton codeFontDownButton;
+    juce::TextButton codeFontUpButton;
+    juce::TextButton tidyCodeButton;
+    juce::TextButton expandCodeButton;
+    SuperColliderTokeniser scTokeniser;
+    juce::CodeDocument codeDocument;
+    SuperColliderCodeEditor scriptEditor;
     juce::TextButton addLaneButton;
     juce::TextButton removeLaneButton;
     juce::TextButton moveLaneUpButton;
@@ -3319,6 +3535,7 @@ private:
     juce::TextEditor logView;
     juce::String scLog;
     bool logVisible = false;
+    bool codeExpanded = false;
     bool fsmRunning = false;
     bool machinePrepared = false;
     int rulesPaneWidth = 500;
@@ -3332,9 +3549,15 @@ private:
     bool bottomPaneUserSized = false;
     std::atomic<bool> audioJobRunning { false };
     std::atomic<bool> transportShouldRun { false };
+    std::atomic<int> transportIntervalMs { 2000 };
+    std::atomic<int> transportCallbackGeneration { 0 };
+    double scheduledTransitionDelaySeconds = 0.0;
+    float codeFontSize = 14.0f;
     std::mutex transportMutex;
     std::condition_variable transportCv;
     std::thread transportThread;
+    bool loadingCodeDocument = false;
+    juce::String pendingCheckId;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

@@ -16,6 +16,7 @@ juce_add_gui_app(MarkovFSM
 target_sources(MarkovFSM
     PRIVATE
         Source/DemoScripts.cpp
+        Source/SuperColliderHost.cpp
         Source/Main.cpp)
 
 target_compile_definitions(MarkovFSM

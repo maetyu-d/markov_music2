@@ -57,6 +57,17 @@ struct State
     int index = 0;
     juce::String name;
     std::vector<Lane> lanes;
+    double tempoBpm = 120.0;
+    int beatsPerBar = 4;
+    int beatUnit = 4;
+
+    double secondsPerBar() const
+    {
+        const auto bpm = juce::jlimit (20.0, 320.0, tempoBpm);
+        const auto beats = juce::jlimit (1, 32, beatsPerBar);
+        const auto unit = juce::jlimit (1, 32, beatUnit);
+        return (60.0 / bpm) * static_cast<double> (beats) * (4.0 / static_cast<double> (unit));
+    }
 };
 
 struct Rule
@@ -200,12 +211,18 @@ public:
         childMachines.clear();
         childMachines.resize (states.size());
 
-        setStateDemo (0, "Intro", { { "Hook lead", "lead" }, { "Straight arp", "arp" }, { "Pop bass", "bassline" }, { "4/4 kit", "softdrums" }, { "Chord pulse", "chords" } });
-        setStateDemo (1, "Verse", { { "Verse lead", "lead" }, { "Counter line", "counter" }, { "Pop bass", "bassline" }, { "4/4 kit", "softdrums" }, { "Chord pulse", "chords" } });
-        setStateDemo (2, "Pre", { { "Lift lead", "lead" }, { "Glass lift", "shimmer" }, { "Counter line", "counter" }, { "Pop bass", "bassline" }, { "4/4 kit", "softdrums" }, { "Chord lift", "chords" } });
-        setStateDemo (3, "Chorus", { { "Chorus hook", "lead" }, { "Wide arp", "arp" }, { "Pop bass", "bassline" }, { "4/4 kit", "softdrums" }, { "Big chords", "chords" } });
-        setStateDemo (4, "Bridge", { { "Bridge lead", "lead" }, { "Answer line", "counter" }, { "Pop bass", "bassline" }, { "4/4 kit", "softdrums" }, { "Bridge chords", "chords" }, { "Soft air", "texture" } });
-        setStateDemo (5, "Outro", { { "Final hook", "lead" }, { "High return", "shimmer" }, { "Low pop bass", "bassline" }, { "Final chords", "chords" } });
+        setStateDemo (0, "Autobahn", { { "Robot hook", "lead" }, { "Motor arp", "arp" }, { "Electric bass", "bassline" }, { "Drum machine", "softdrums" }, { "Vocoder chords", "chords" } });
+        setStateDemo (1, "Downtown", { { "Neon lead", "lead" }, { "Answer pulse", "counter" }, { "Electric bass", "bassline" }, { "Drum machine", "softdrums" }, { "Vocoder chords", "chords" } });
+        setStateDemo (2, "Lift", { { "Lift hook", "lead" }, { "Glass line", "shimmer" }, { "Counter pulse", "counter" }, { "Electric bass", "bassline" }, { "Drum machine", "softdrums" }, { "Lift chords", "chords" } });
+        setStateDemo (3, "Chorus", { { "Main hook", "lead" }, { "Octave arp", "arp" }, { "Round bass", "bassline" }, { "Four on floor", "softdrums" }, { "Wide chords", "chords" } });
+        setStateDemo (4, "Bridge", { { "Bridge hook", "lead" }, { "Answer pulse", "counter" }, { "Electric bass", "bassline" }, { "Drum machine", "softdrums" }, { "Bridge chords", "chords" }, { "Soft air", "texture" } });
+        setStateDemo (5, "Reprise", { { "Final hook", "lead" }, { "Glass return", "shimmer" }, { "Low bass", "bassline" }, { "Final chords", "chords" } });
+        setStateTiming (0, 104.0, 4, 4);
+        setStateTiming (1, 106.0, 4, 4);
+        setStateTiming (2, 108.0, 4, 4);
+        setStateTiming (3, 110.0, 4, 4);
+        setStateTiming (4, 102.0, 4, 4);
+        setStateTiming (5, 104.0, 4, 4);
 
         rules = {
             { 0, 0, 6.0f }, { 0, 1, 1.0f },
@@ -358,6 +375,14 @@ public:
     {
         state (stateIndex).name = name;
         setStateDemo (stateIndex, laneDefs);
+    }
+
+    void setStateTiming (int stateIndex, double bpm, int beats, int unit)
+    {
+        auto& s = state (stateIndex);
+        s.tempoBpm = juce::jlimit (20.0, 320.0, bpm);
+        s.beatsPerBar = juce::jlimit (1, 32, beats);
+        s.beatUnit = juce::jlimit (1, 32, unit);
     }
 
     std::vector<State> states;
