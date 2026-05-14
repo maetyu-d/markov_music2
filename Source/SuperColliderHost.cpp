@@ -71,6 +71,36 @@ juce::String scSymbolArrayLiteral (const juce::StringArray& values)
     return "[" + symbols.joinIntoString (", ") + "]";
 }
 
+juce::String injectLaneMetering (juce::String source, const juce::String& laneId)
+{
+    const auto playIndex = source.indexOf ("}.play;");
+    if (playIndex < 0)
+        return source;
+
+    const auto beforePlay = source.substring (0, playIndex);
+    const auto expressionEnd = beforePlay.lastIndexOfChar (';');
+    if (expressionEnd < 0)
+        return source;
+
+    const auto beforeExpression = source.substring (0, expressionEnd);
+    auto expressionStart = beforeExpression.lastIndexOfChar ('\n');
+    if (expressionStart < 0)
+        expressionStart = 0;
+    else
+        ++expressionStart;
+
+    const auto expression = source.substring (expressionStart, expressionEnd).trim();
+    if (expression.isEmpty())
+        return source;
+
+    const auto originalLine = source.substring (expressionStart, expressionEnd);
+    const auto trimmedLeft = originalLine.trimStart();
+    const auto indent = originalLine.substring (0, originalLine.length() - trimmedLeft.length());
+    const auto meteredLine = indent + "~markovMetered.(" + scSymbolLiteral (laneId) + ", " + expression + ");";
+
+    return source.substring (0, expressionStart) + meteredLine + source.substring (expressionEnd + 1);
+}
+
 juce::String scFloatLiteral (double value)
 {
     return juce::String (juce::jlimit (-1000000.0, 1000000.0, value), 6);
@@ -91,15 +121,8 @@ juce::String scTimingModeLiteral (NestedTimingMode mode)
 
 bool laneShouldPlayInState (const State& state, const Lane& lane)
 {
-    if (! lane.enabled || lane.muted)
-        return false;
-
-    const auto anySolo = std::any_of (state.lanes.begin(), state.lanes.end(), [] (const Lane& other)
-    {
-        return other.enabled && other.solo;
-    });
-
-    return ! anySolo || lane.solo;
+    juce::ignoreUnused (state);
+    return lane.enabled;
 }
 
 juce::String machineAsSuperColliderEvent (const MachineModel& model)
@@ -234,7 +257,7 @@ int SuperColliderHost::prepareData(const LaneSnapshot& lane, const juce::String&
             return -1;
 
         auto script = lane.script;
-        script = script.replace ("vol=1", "vol=" + juce::String (juce::jlimit (0.0f, 1.0f, lane.volume), 3));
+        script = injectLaneMetering (script, lane.id);
         auto scriptFile = makeTempScript (lane.id, script);
 
         if (auto* existing = tempScripts[lane.id])
@@ -265,6 +288,14 @@ void SuperColliderHost::setLaneVolume(Lane& lane)
 
         if (bridgeProcess != nullptr && bridgeProcess->isRunning())
             sendVolumeCommand (lane.id, lane.volume);
+    }
+
+void SuperColliderHost::setLaneEffectiveVolume(const Lane& lane, float volume)
+    {
+        const juce::ScopedLock lock (hostLock);
+
+        if (bridgeProcess != nullptr && bridgeProcess->isRunning())
+            sendVolumeCommand (lane.id, juce::jlimit (0.0f, 1.0f, volume));
     }
 
 void SuperColliderHost::stop(Lane& lane, double releaseSeconds)
@@ -542,6 +573,11 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "~markovStopTokens = IdentityDictionary.new;\n"
                "~markovVolumes = IdentityDictionary.new;\n"
                "~markovPrograms = IdentityDictionary.new;\n"
+               "~markovLaneBuses = IdentityDictionary.new;\n"
+               "~markovLaneRouters = IdentityDictionary.new;\n"
+               "~markovMeterIds = IdentityDictionary.new;\n"
+               "~markovMeterKeys = IdentityDictionary.new;\n"
+               "~markovNextMeterId = 1;\n"
                "~markovJuce = NetAddr(\"127.0.0.1\", 57142);\n"
                "~markovLoad = { |key, path|\n"
                "    var file, source;\n"
@@ -580,6 +616,56 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "        (\"MARKOV_CHECK_ERROR \" ++ checkId ++ \" \" ++ error.errorString).postln;\n"
                "    };\n"
                "};\n"
+               "SynthDef(\\markovLaneRouter, { |bus = 0, replyId = 0|\n"
+               "    var sig = In.ar(bus, 2);\n"
+               "    var mono = Mix(sig) * 0.5;\n"
+               "    var meterTrig = Impulse.kr(30, 0) + Trig1.kr(1, ControlDur.ir);\n"
+               "    var rms = Amplitude.kr(mono, 0.004, 0.055).clip(0, 1);\n"
+               "    var peak = Peak.kr(mono.abs, meterTrig).clip(0, 1);\n"
+               "    SendReply.kr(meterTrig, '/markov/laneMeter', [rms, peak], replyId);\n"
+               "    Out.ar(0, sig);\n"
+               "}).add;\n"
+               "OSCdef(\\markovLaneMeter, { |msg|\n"
+               "    var key = ~markovMeterKeys[msg[2].asInteger];\n"
+               "    if (key.notNil) { ~markovJuce.sendMsg('/markov/meter', key.asString, msg[3].asFloat, msg[4].asFloat) };\n"
+               "}, '/markov/laneMeter');\n"
+               "~markovMeterIdFor = { |key|\n"
+               "    var id = ~markovMeterIds[key];\n"
+               "    if (id.isNil) {\n"
+               "        id = ~markovNextMeterId;\n"
+               "        ~markovNextMeterId = ~markovNextMeterId + 1;\n"
+               "        ~markovMeterIds[key] = id;\n"
+               "        ~markovMeterKeys[id] = key;\n"
+               "    };\n"
+               "    id;\n"
+               "};\n"
+               "~markovMetered = { |key, sig|\n"
+               "    var controlled = sig * Lag.kr(\\markovVol.kr(~markovVolumes[key] ? 1), 0.02);\n"
+               "    var mono = Mix(controlled) * 0.5;\n"
+               "    var meterTrig = Impulse.kr(30, 0) + Trig1.kr(1, ControlDur.ir);\n"
+               "    var rms = Amplitude.kr(mono, 0.004, 0.055).clip(0, 1);\n"
+               "    var peak = Peak.kr(mono.abs, meterTrig).clip(0, 1);\n"
+               "    SendReply.kr(meterTrig, '/markov/laneMeter', [rms, peak], ~markovMeterIdFor.(key));\n"
+               "    controlled;\n"
+               "};\n"
+               "~markovStartLaneRouter = { |key, bus|\n"
+               "    var router = ~markovLaneRouters[key];\n"
+               "    var target = ~markovMaster ? s;\n"
+               "    if (router.notNil) { router.free };\n"
+               "    ~markovLaneRouters[key] = Synth(\\markovLaneRouter,\n"
+               "        [\\bus, bus, \\replyId, ~markovMeterIdFor.(key)],\n"
+               "        target: target,\n"
+               "        addAction: if (~markovMaster.notNil, { \\addBefore }, { \\addToTail }));\n"
+               "};\n"
+               "~markovLaneBusFor = { |key|\n"
+               "    var bus = ~markovLaneBuses[key];\n"
+               "    if (bus.isNil) {\n"
+               "        bus = Bus.audio(s, 2);\n"
+               "        ~markovLaneBuses[key] = bus;\n"
+               "        ~markovStartLaneRouter.(key, bus);\n"
+               "    };\n"
+               "    bus;\n"
+               "};\n"
                "~markovStartMaster = {\n"
                "    if (~markovMaster.notNil) { ~markovMaster.free };\n"
                "    ~markovMaster = {\n"
@@ -594,7 +680,7 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "    volume = volume.clip(0, 1);\n"
                "    ~markovVolumes[key] = volume;\n"
                "    obj = ~markovObjects[key];\n"
-               "    if (obj.notNil and: { obj.respondsTo(\\set) }) { obj.set(\\vol, volume) };\n"
+               "    if (obj.notNil and: { obj.respondsTo(\\set) }) { obj.set(\\markovVol, volume) };\n"
                "};\n"
                "~markovStop = { |key, release|\n"
                "    var obj = ~markovObjects[key];\n"
@@ -630,6 +716,11 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "    ~markovObjects = IdentityDictionary.new;\n"
                "    ~markovStopTokens = IdentityDictionary.new;\n"
                "    ~markovVolumes = IdentityDictionary.new;\n"
+               "    ~markovLaneBuses = IdentityDictionary.new;\n"
+               "    ~markovLaneRouters = IdentityDictionary.new;\n"
+               "    ~markovMeterIds = IdentityDictionary.new;\n"
+               "    ~markovMeterKeys = IdentityDictionary.new;\n"
+               "    ~markovNextMeterId = 1;\n"
                "    SystemClock.sched(0.05, { ~markovStartMaster.(); nil });\n"
                "};\n"
                "~markovWhenReady.({ ~markovStartMaster.(); });\n"
@@ -639,11 +730,12 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "        var program = ~markovPrograms[key];\n"
                "        if (obj.notNil) {\n"
                "            ~markovStopTokens.removeAt(key);\n"
-               "            if (obj.respondsTo(\\set)) { obj.set(\\gate, 1, \\fade, ~markovAttack, \\vol, ~markovVolumes[key] ? 1) };\n"
+               "            if (obj.respondsTo(\\set)) { obj.set(\\gate, 1, \\fade, ~markovAttack, \\markovVol, ~markovVolumes[key] ? 1) };\n"
                "        } {\n"
                "            if (program.notNil) {\n"
                "                ~markovStopTokens.removeAt(key);\n"
-               "                ~markovObjects[key] = program.value;\n"
+               "                obj = program.value;\n"
+               "                ~markovObjects[key] = obj;\n"
                "            };\n"
                "        };\n"
                "    });\n"

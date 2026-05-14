@@ -25,6 +25,7 @@ public:
     bool prepare (Lane& lane, const juce::String& sclangPath);
     int prepareData (const LaneSnapshot& lane, const juce::String& sclangPath);
     void setLaneVolume (Lane& lane);
+    void setLaneEffectiveVolume (const Lane& lane, float volume);
     void stop (Lane& lane, double releaseSeconds = musicalReleaseSeconds);
     void transition (const std::vector<Lane*>& lanesToStop,
                      const std::vector<Lane*>& lanesToStart,
