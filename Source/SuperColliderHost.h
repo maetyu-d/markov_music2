@@ -24,6 +24,7 @@ public:
     void play (Lane& lane, const juce::String& sclangPath);
     bool prepare (Lane& lane, const juce::String& sclangPath);
     int prepareData (const LaneSnapshot& lane, const juce::String& sclangPath);
+    bool freezeLane (Lane& lane, const juce::String& sclangPath, double durationSeconds, const juce::File& outputFile);
     void setLaneVolume (Lane& lane);
     void setLaneEffectiveVolume (const Lane& lane, float volume);
     void stop (Lane& lane, double releaseSeconds = musicalReleaseSeconds);
@@ -50,6 +51,8 @@ private:
     juce::String resolveSclangExecutable (const juce::String& sclangPath) const;
     juce::String makeBridgeScript() const;
     void sendLoadCommand (const juce::String& laneId, const juce::String& scriptPath);
+    void sendLoadFrozenCommand (const juce::String& laneId, const juce::String& audioPath);
+    void sendFreezeCommand (const juce::String& laneId, const juce::String& audioPath, double durationSeconds);
     void sendPlayCommand (const juce::String& laneId);
     void sendTransitionCommand (const juce::StringArray& stopIds,
                                 const juce::StringArray& playIds,

@@ -33,6 +33,13 @@ inline juce::String nestedTimingModeName (NestedTimingMode mode)
 
 struct Lane
 {
+    Lane() = default;
+
+    Lane (juce::String idToUse, juce::String nameToUse, juce::String scriptToUse)
+        : id (std::move (idToUse)), name (std::move (nameToUse)), script (std::move (scriptToUse))
+    {
+    }
+
     juce::String id;
     juce::String name;
     juce::String script;
@@ -40,6 +47,9 @@ struct Lane
     bool enabled = true;
     bool muted = false;
     bool solo = false;
+    bool frozen = false;
+    bool freezeStale = false;
+    juce::String frozenAudioPath;
     bool playing = false;
     int preparedBridge = -1;
 };
@@ -50,6 +60,9 @@ struct LaneSnapshot
     juce::String name;
     juce::String script;
     float volume = 1.0f;
+    bool frozen = false;
+    bool freezeStale = false;
+    juce::String frozenAudioPath;
 };
 
 struct State

@@ -1489,6 +1489,7 @@ public:
     std::function<void (int)> onEnabledToggled;
     std::function<void (int)> onMuteToggled;
     std::function<void (int)> onSoloToggled;
+    std::function<void (int)> onFreezeToggled;
     std::function<void (int, float)> onVolumeChanged;
 
     void setState (State& stateToShow, int selectedLane)
@@ -1541,10 +1542,11 @@ public:
                 g.setColour (lane.playing ? ink().withAlpha (0.85f) : juce::Colour (0xff101318).withAlpha (0.8f));
                 g.drawEllipse (dotArea.expanded (1.0f), lane.playing ? 1.4f : 0.8f);
 
-                auto buttons = rowText.removeFromRight (82);
+                auto buttons = rowText.removeFromRight (106);
                 drawToggle (g, buttons.removeFromLeft (25), "E", lane.enabled, accentB());
                 drawToggle (g, buttons.removeFromLeft (25), "M", lane.muted, accentC());
                 drawToggle (g, buttons.removeFromLeft (25), "S", lane.solo, accentA());
+                drawToggle (g, buttons.removeFromLeft (25), "F", lane.frozen, lane.freezeStale ? accentC() : accentB());
 
                 auto volumeArea = rowText.removeFromRight (68).reduced (8, 0);
                 drawVolumeControl (g, volumeArea, lane.volume, laneColour, lane.enabled);
@@ -1569,10 +1571,11 @@ public:
             auto row = list.removeFromTop (43).reduced (0, 4);
             if (row.contains (event.getPosition()))
             {
-                auto controls = row.reduced (10, 0).removeFromRight (82);
+                auto controls = row.reduced (10, 0).removeFromRight (106);
                 auto enabledArea = controls.removeFromLeft (25);
                 auto muteArea = controls.removeFromLeft (25);
                 auto soloArea = controls.removeFromLeft (25);
+                auto freezeArea = controls.removeFromLeft (25);
                 auto volumeArea = getVolumeBoundsForRow (row);
                 selectedIndex = i;
                 if (volumeArea.contains (event.getPosition()))
@@ -1594,6 +1597,11 @@ public:
                 {
                     if (onSoloToggled)
                         onSoloToggled (i);
+                }
+                else if (freezeArea.contains (event.getPosition()))
+                {
+                    if (onFreezeToggled)
+                        onFreezeToggled (i);
                 }
                 else if (onTrackSelected)
                     onTrackSelected (i);
@@ -1669,7 +1677,7 @@ private:
     {
         auto rowText = row.reduced (10, 0);
         rowText.removeFromLeft (12);
-        rowText.removeFromRight (82);
+        rowText.removeFromRight (106);
         return rowText.removeFromRight (68).reduced (8, 7);
     }
 
@@ -1747,6 +1755,7 @@ public:
     std::function<void (int)> onEnabledToggled;
     std::function<void (int)> onMuteToggled;
     std::function<void (int)> onSoloToggled;
+    std::function<void (int)> onFreezeToggled;
     std::function<void (int, float)> onVolumeChanged;
 
     MixerComponent()
@@ -1835,6 +1844,11 @@ public:
                 if (onSoloToggled)
                     onSoloToggled (i);
             }
+            else if (buttons.freeze.contains (event.getPosition()))
+            {
+                if (onFreezeToggled)
+                    onFreezeToggled (i);
+            }
             else if (onTrackSelected)
             {
                 onTrackSelected (i);
@@ -1876,6 +1890,7 @@ private:
         juce::Rectangle<int> enabled;
         juce::Rectangle<int> mute;
         juce::Rectangle<int> solo;
+        juce::Rectangle<int> freeze;
     };
 
     void timerCallback() override
@@ -1908,7 +1923,7 @@ private:
         g.drawEllipse (dotArea.expanded (1.0f), active ? 1.3f : 0.8f);
 
         auto valueArea = top.removeFromRight (38);
-        top.removeFromRight (80);
+        top.removeFromRight (104);
         g.setColour (selected ? ink() : mutedInk().withAlpha (lane.enabled ? 0.95f : 0.46f));
         g.setFont (juce::FontOptions (12.0f, selected ? juce::Font::bold : juce::Font::plain));
         g.drawFittedText (lane.name, top, juce::Justification::centredLeft, 1);
@@ -1920,6 +1935,7 @@ private:
         drawToggle (g, buttons.enabled, "E", lane.enabled, accentB());
         drawToggle (g, buttons.mute, "M", lane.muted, accentC());
         drawToggle (g, buttons.solo, "S", lane.solo, accentA());
+        drawToggle (g, buttons.freeze, "F", lane.frozen, lane.freezeStale ? accentC() : accentB());
 
         auto volumeArea = getVolumeBounds (row);
         const auto clipped = juce::jlimit (0.0f, 1.0f, lane.volume);
@@ -1985,11 +2001,12 @@ private:
 
     ButtonBounds getButtonBounds (juce::Rectangle<int> row) const
     {
-        auto buttons = row.reduced (10, 4).removeFromTop (22).removeFromRight (76);
+        auto buttons = row.reduced (10, 4).removeFromTop (22).removeFromRight (100);
         ButtonBounds result;
         result.enabled = buttons.removeFromLeft (25);
         result.mute = buttons.removeFromLeft (25);
         result.solo = buttons.removeFromLeft (25);
+        result.freeze = buttons.removeFromLeft (25);
         return result;
     }
 
@@ -2700,6 +2717,7 @@ public:
             addListener (this, "/markov/state");
             addListener (this, "/markov/meter");
             addListener (this, "/markov/pulse");
+            addListener (this, "/markov/frozen");
         }
         else
             appendLog ("Could not bind visual state OSC port 57142");
@@ -2849,6 +2867,11 @@ public:
             toggleInspectorLaneSolo (newIndex);
         };
 
+        trackList.onFreezeToggled = [this] (int newIndex)
+        {
+            toggleInspectorLaneFreeze (newIndex);
+        };
+
         trackList.onVolumeChanged = [this] (int newIndex, float volume)
         {
             setInspectorLaneVolume (newIndex, volume);
@@ -2872,6 +2895,11 @@ public:
         mixer.onSoloToggled = [this] (int newIndex)
         {
             toggleInspectorLaneSolo (newIndex);
+        };
+
+        mixer.onFreezeToggled = [this] (int newIndex)
+        {
+            toggleInspectorLaneFreeze (newIndex);
         };
 
         mixer.onVolumeChanged = [this] (int newIndex, float volume)
@@ -3548,6 +3576,12 @@ private:
             return;
         }
 
+        if (address == "/markov/frozen")
+        {
+            handleFrozenMessage (message);
+            return;
+        }
+
         if (address != "/markov/state")
             return;
 
@@ -3580,6 +3614,24 @@ private:
 
         graph.setTimingPulse (machineId, stateIndex, phase, beatIndex, beatCount);
         updateTransitionPreview();
+    }
+
+    void handleFrozenMessage (const juce::OSCMessage& message)
+    {
+        if (message.size() < 2 || ! message[0].isString() || ! message[1].isString())
+            return;
+
+        auto* lane = findLaneById (machine, message[0].getString());
+        if (lane == nullptr)
+            return;
+
+        lane->frozen = true;
+        lane->freezeStale = false;
+        lane->frozenAudioPath = message[1].getString();
+        lane->preparedBridge = -1;
+        statusLabel.setText ("Freeze ready", juce::dontSendNotification);
+        markMachineDirty (UndoGroup::continuous);
+        refreshControls();
     }
 
     void handleMeterMessage (const juce::OSCMessage& message)
@@ -3721,6 +3773,9 @@ private:
         object->setProperty ("enabled", lane.enabled);
         object->setProperty ("muted", lane.muted);
         object->setProperty ("solo", lane.solo);
+        object->setProperty ("frozen", lane.frozen);
+        object->setProperty ("freezeStale", lane.freezeStale);
+        object->setProperty ("frozenAudioPath", lane.frozenAudioPath);
         return object;
     }
 
@@ -3951,6 +4006,11 @@ private:
         lane.enabled = static_cast<bool> (value.getProperty ("enabled", true));
         lane.muted = static_cast<bool> (value.getProperty ("muted", false));
         lane.solo = static_cast<bool> (value.getProperty ("solo", false));
+        lane.frozen = static_cast<bool> (value.getProperty ("frozen", false));
+        lane.freezeStale = static_cast<bool> (value.getProperty ("freezeStale", false));
+        lane.frozenAudioPath = value.getProperty ("frozenAudioPath", {}).toString();
+        if (lane.frozen && lane.frozenAudioPath.isNotEmpty() && ! juce::File (lane.frozenAudioPath).existsAsFile())
+            lane.freezeStale = true;
         lane.playing = false;
         lane.preparedBridge = -1;
         return true;
@@ -4303,6 +4363,8 @@ private:
         const auto tidied = tidyScriptText (codeDocument.getAllContent());
         lane.script = tidied;
         lane.preparedBridge = -1;
+        if (lane.frozen)
+            lane.freezeStale = true;
         loadingCodeDocument = true;
         scriptEditor.loadContent (tidied);
         loadingCodeDocument = false;
@@ -4325,8 +4387,11 @@ private:
         if (loadingCodeDocument)
             return;
 
-        currentInspectorMachine().selectedLaneRef().script = codeDocument.getAllContent();
-        currentInspectorMachine().selectedLaneRef().preparedBridge = -1;
+        auto& lane = currentInspectorMachine().selectedLaneRef();
+        lane.script = codeDocument.getAllContent();
+        lane.preparedBridge = -1;
+        if (lane.frozen)
+            lane.freezeStale = true;
         if (pendingCheckId.isEmpty())
             setCodeCheckStatus ("Modified", mutedInk());
         updateCodeStats();
@@ -4433,6 +4498,32 @@ private:
         return {};
     }
 
+    juce::File freezeFileForLane (const Lane& lane) const
+    {
+        auto safeId = lane.id.retainCharacters ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_");
+        auto dir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                       .getChildFile ("MarkovFSM")
+                       .getChildFile ("freezes");
+        dir.createDirectory();
+        return dir.getChildFile (safeId + ".wav");
+    }
+
+    Lane* findLaneById (MachineModel& model, const juce::String& laneId)
+    {
+        for (auto& state : model.states)
+        {
+            for (auto& lane : state.lanes)
+                if (lane.id == laneId)
+                    return &lane;
+
+            if (auto* child = model.childMachine (state.index))
+                if (auto* found = findLaneById (*child, laneId))
+                    return found;
+        }
+
+        return nullptr;
+    }
+
     void commitNestedDivisionEditor()
     {
         if (auto* child = selectedNestedMachine())
@@ -4522,7 +4613,7 @@ private:
         for (const auto& state : model.states)
         {
             for (const auto& lane : state.lanes)
-                lanes.push_back ({ lane.id, lane.name, lane.script, lane.volume });
+                lanes.push_back ({ lane.id, lane.name, lane.script, lane.volume, lane.frozen, lane.freezeStale, lane.frozenAudioPath });
 
             if (auto* child = model.childMachine (state.index))
                 collectLaneSnapshots (*child, lanes);
@@ -5058,6 +5149,33 @@ private:
         inspected.selectedLaneRef().solo = ! inspected.selectedLaneRef().solo;
         markMachineDirty();
         applyAllMixToHost();
+        refreshControls();
+    }
+
+    void toggleInspectorLaneFreeze (int newIndex)
+    {
+        auto& inspected = currentInspectorMachine();
+        inspected.selectedLane = newIndex;
+        auto& lane = inspected.selectedLaneRef();
+        if (lane.frozen)
+        {
+            lane.frozen = false;
+            lane.preparedBridge = -1;
+            statusLabel.setText ("Live code", juce::dontSendNotification);
+        }
+        else
+        {
+            lane.frozen = true;
+            lane.freezeStale = true;
+            lane.frozenAudioPath = freezeFileForLane (lane).getFullPathName();
+            lane.preparedBridge = -1;
+            const auto duration = inspected.state (inspected.selectedState).secondsPerBar() / juce::jmax (0.05, rateSlider.getValue());
+            if (! host.freezeLane (lane, getSclangPathOverride(), duration, juce::File (lane.frozenAudioPath)))
+                statusLabel.setText ("Freeze failed", juce::dontSendNotification);
+            else
+                statusLabel.setText ("Freezing lane", juce::dontSendNotification);
+        }
+        markMachineDirty();
         refreshControls();
     }
 

@@ -241,7 +241,7 @@ void SuperColliderHost::play(Lane& lane, const juce::String& sclangPath)
 
 bool SuperColliderHost::prepare(Lane& lane, const juce::String& sclangPath)
     {
-        if (prepareData ({ lane.id, lane.name, lane.script, lane.volume }, sclangPath) < 0)
+        if (prepareData ({ lane.id, lane.name, lane.script, lane.volume, lane.frozen, lane.freezeStale, lane.frozenAudioPath }, sclangPath) < 0)
             return false;
 
         lane.preparedBridge = bridgeGeneration;
@@ -255,6 +255,15 @@ int SuperColliderHost::prepareData(const LaneSnapshot& lane, const juce::String&
 
         if (! ensureBridgeRunningLocked (sclangPath))
             return -1;
+
+        if (lane.frozen && ! lane.freezeStale && lane.frozenAudioPath.isNotEmpty())
+        {
+            sendLoadFrozenCommand (lane.id, lane.frozenAudioPath);
+            sendVolumeCommand (lane.id, lane.volume);
+            addLog ("Loaded frozen " + lane.name);
+            setStatus ("Audio ready");
+            return bridgeGeneration;
+        }
 
         auto script = lane.script;
         script = injectLaneMetering (script, lane.id);
@@ -276,6 +285,38 @@ int SuperColliderHost::prepareData(const LaneSnapshot& lane, const juce::String&
         addLog ("Loaded " + lane.name);
         setStatus ("Audio ready");
         return bridgeGeneration;
+    }
+
+bool SuperColliderHost::freezeLane (Lane& lane, const juce::String& sclangPath, double durationSeconds, const juce::File& outputFile)
+    {
+        appendRuntimeLog ("freeze requested: " + lane.id + " -> " + outputFile.getFullPathName());
+        const juce::ScopedLock lock (hostLock);
+
+        if (! ensureBridgeRunningLocked (sclangPath))
+            return false;
+
+        LaneSnapshot liveSnapshot { lane.id, lane.name, lane.script, lane.volume, false, false, {} };
+        auto script = injectLaneMetering (liveSnapshot.script, liveSnapshot.id);
+        auto scriptFile = makeTempScript (liveSnapshot.id, script);
+
+        if (auto* existing = tempScripts[liveSnapshot.id])
+        {
+            existing->deleteFile();
+            tempScriptStorage.removeObject (existing, true);
+            tempScripts.remove (liveSnapshot.id);
+        }
+
+        auto* rawFile = new juce::File (scriptFile);
+        tempScriptStorage.add (rawFile);
+        tempScripts.set (liveSnapshot.id, rawFile);
+
+        outputFile.getParentDirectory().createDirectory();
+        sendLoadCommand (lane.id, scriptFile.getFullPathName());
+        sendVolumeCommand (lane.id, lane.volume);
+        sendFreezeCommand (lane.id, outputFile.getFullPathName(), durationSeconds);
+        setStatus ("Freezing " + lane.name);
+        addLog ("Freezing " + lane.name);
+        return true;
     }
 
 void SuperColliderHost::setLaneVolume(Lane& lane)
@@ -573,6 +614,9 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "~markovStopTokens = IdentityDictionary.new;\n"
                "~markovVolumes = IdentityDictionary.new;\n"
                "~markovPrograms = IdentityDictionary.new;\n"
+               "~markovFrozenPaths = IdentityDictionary.new;\n"
+               "~markovFrozenBuffers = IdentityDictionary.new;\n"
+               "~markovFrozenBufferPaths = IdentityDictionary.new;\n"
                "~markovLaneBuses = IdentityDictionary.new;\n"
                "~markovLaneRouters = IdentityDictionary.new;\n"
                "~markovMeterIds = IdentityDictionary.new;\n"
@@ -585,7 +629,11 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "    if (file.isOpen.not) { (\"Markov could not open lane: \" ++ path).warn; ^nil };\n"
                "    source = file.readAllString;\n"
                "    file.close;\n"
+               "    ~markovFrozenPaths.removeAt(key);\n"
                "    ~markovPrograms[key] = (\"{ \" ++ source ++ \" }\").interpret;\n"
+               "};\n"
+               "~markovLoadFrozen = { |key, path|\n"
+               "    ~markovFrozenPaths[key] = path;\n"
                "};\n"
                "~markovWriteCheckResult = { |resultPath, text|\n"
                "    var out = File(resultPath, \"w\");\n"
@@ -625,6 +673,17 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "    SendReply.kr(meterTrig, '/markov/laneMeter', [rms, peak], replyId);\n"
                "    Out.ar(0, sig);\n"
                "}).add;\n"
+               "SynthDef(\\markovFrozenPlayer, { |buf = 0, gate = 1, fade = 0.006, markovVol = 1, replyId = 0|\n"
+               "    var sig = PlayBuf.ar(2, buf, BufRateScale.kr(buf), loop: 1);\n"
+               "    var env = EnvGen.kr(Env.asr(fade.max(0.001), 1, fade.max(0.001)), gate, doneAction: 2);\n"
+               "    var controlled = sig * env * Lag.kr(markovVol, 0.02);\n"
+               "    var mono = Mix(controlled) * 0.5;\n"
+               "    var meterTrig = Impulse.kr(30, 0) + Trig1.kr(1, ControlDur.ir);\n"
+               "    var rms = Amplitude.kr(mono, 0.004, 0.055).clip(0, 1);\n"
+               "    var peak = Peak.kr(mono.abs, meterTrig).clip(0, 1);\n"
+               "    SendReply.kr(meterTrig, '/markov/laneMeter', [rms, peak], replyId);\n"
+               "    Out.ar(0, controlled);\n"
+               "}).add;\n"
                "OSCdef(\\markovLaneMeter, { |msg|\n"
                "    var key = ~markovMeterKeys[msg[2].asInteger];\n"
                "    if (key.notNil) { ~markovJuce.sendMsg('/markov/meter', key.asString, msg[3].asFloat, msg[4].asFloat) };\n"
@@ -641,12 +700,8 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "};\n"
                "~markovMetered = { |key, sig|\n"
                "    var controlled = sig * Lag.kr(\\markovVol.kr(~markovVolumes[key] ? 1), 0.02);\n"
-               "    var mono = Mix(controlled) * 0.5;\n"
-               "    var meterTrig = Impulse.kr(30, 0) + Trig1.kr(1, ControlDur.ir);\n"
-               "    var rms = Amplitude.kr(mono, 0.004, 0.055).clip(0, 1);\n"
-               "    var peak = Peak.kr(mono.abs, meterTrig).clip(0, 1);\n"
-               "    SendReply.kr(meterTrig, '/markov/laneMeter', [rms, peak], ~markovMeterIdFor.(key));\n"
-               "    controlled;\n"
+               "    Out.ar(~markovLaneBusFor.(key), controlled);\n"
+               "    Silent.ar(2);\n"
                "};\n"
                "~markovStartLaneRouter = { |key, bus|\n"
                "    var router = ~markovLaneRouters[key];\n"
@@ -695,7 +750,6 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "                if ((~markovObjects[key] === obj) and: { ~markovStopTokens[key] == token }) {\n"
                "                    ~markovObjects.removeAt(key);\n"
                "                    ~markovStopTokens.removeAt(key);\n"
-               "                    if (obj.respondsTo(\\free)) { obj.free };\n"
                "                };\n"
                "                nil;\n"
                "            });\n"
@@ -716,6 +770,9 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "    ~markovObjects = IdentityDictionary.new;\n"
                "    ~markovStopTokens = IdentityDictionary.new;\n"
                "    ~markovVolumes = IdentityDictionary.new;\n"
+               "    ~markovFrozenPaths = IdentityDictionary.new;\n"
+               "    ~markovFrozenBuffers = IdentityDictionary.new;\n"
+               "    ~markovFrozenBufferPaths = IdentityDictionary.new;\n"
                "    ~markovLaneBuses = IdentityDictionary.new;\n"
                "    ~markovLaneRouters = IdentityDictionary.new;\n"
                "    ~markovMeterIds = IdentityDictionary.new;\n"
@@ -724,20 +781,71 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "    SystemClock.sched(0.05, { ~markovStartMaster.(); nil });\n"
                "};\n"
                "~markovWhenReady.({ ~markovStartMaster.(); });\n"
+               "~markovPlayFrozen = { |key, path|\n"
+               "    var buf = ~markovFrozenBuffers[key];\n"
+               "    var oldPath = ~markovFrozenBufferPaths[key];\n"
+               "    var makeSynth = { |loaded|\n"
+               "        var synth = Synth(\\markovFrozenPlayer, [\\buf, loaded, \\gate, 1, \\fade, ~markovAttack, \\markovVol, ~markovVolumes[key] ? 1, \\replyId, ~markovMeterIdFor.(key)]);\n"
+               "        ~markovObjects[key] = synth;\n"
+               "        synth;\n"
+               "    };\n"
+               "    if (buf.isNil or: { oldPath != path }) {\n"
+               "        if (buf.notNil) { buf.free };\n"
+               "        ~markovFrozenBufferPaths[key] = path;\n"
+               "        Buffer.read(s, path, action: { |loaded|\n"
+               "            ~markovFrozenBuffers[key] = loaded;\n"
+               "            makeSynth.(loaded);\n"
+               "        });\n"
+               "        nil;\n"
+               "    } {\n"
+               "        makeSynth.(buf);\n"
+               "    };\n"
+               "};\n"
                "~markovPlay = { |key|\n"
                "    ~markovWhenReady.({\n"
                "        var obj = ~markovObjects[key];\n"
                "        var program = ~markovPrograms[key];\n"
+               "        var frozenPath = ~markovFrozenPaths[key];\n"
                "        if (obj.notNil) {\n"
                "            ~markovStopTokens.removeAt(key);\n"
                "            if (obj.respondsTo(\\set)) { obj.set(\\gate, 1, \\fade, ~markovAttack, \\markovVol, ~markovVolumes[key] ? 1) };\n"
                "        } {\n"
-               "            if (program.notNil) {\n"
+               "            if (frozenPath.notNil) {\n"
+               "                ~markovStopTokens.removeAt(key);\n"
+               "                obj = ~markovPlayFrozen.(key, frozenPath);\n"
+               "                if (obj.notNil) { ~markovObjects[key] = obj };\n"
+               "            } { if (program.notNil) {\n"
                "                ~markovStopTokens.removeAt(key);\n"
                "                obj = program.value;\n"
                "                ~markovObjects[key] = obj;\n"
-               "            };\n"
+               "            } };\n"
                "        };\n"
+               "    });\n"
+               "};\n"
+               "~markovFreeze = { |key, path, duration = 4|\n"
+               "    ~markovWhenReady.({\n"
+               "        Routine({\n"
+               "            var program = ~markovPrograms[key];\n"
+               "            var obj, recBuf, recSynth;\n"
+               "            duration = duration.clip(0.25, 64);\n"
+               "            if (program.isNil) { (\"MARKOV_FREEZE_ERROR \" ++ key ++ \" no program\").warn; ^nil };\n"
+               "            ~markovStop.(key, 0.02);\n"
+               "            recBuf = Buffer.alloc(s, (s.sampleRate * duration).asInteger.max(1024), 2);\n"
+               "            s.sync;\n"
+               "            recSynth = { |buf, bus| RecordBuf.ar(In.ar(bus, 2), buf, loop: 0, doneAction: 2); Silent.ar(2) }.play(s, addAction: \\addToTail, args: [\\buf, recBuf, \\bus, ~markovLaneBusFor.(key)]);\n"
+               "            s.sync;\n"
+               "            obj = program.value;\n"
+               "            ~markovObjects[key] = obj;\n"
+               "            duration.wait;\n"
+               "            ~markovStop.(key, 0.05);\n"
+               "            s.sync;\n"
+               "            recBuf.write(path, \"wav\", \"float\", -1, 0, false);\n"
+               "            s.sync;\n"
+               "            recBuf.free;\n"
+               "            ~markovFrozenPaths[key] = path;\n"
+               "            ~markovJuce.sendMsg('/markov/frozen', key.asString, path);\n"
+               "            (\"MARKOV_FREEZE_DONE \" ++ key ++ \" \" ++ path).postln;\n"
+               "        }).play(SystemClock);\n"
                "    });\n"
                "};\n"
                "~markovTransition = { |stopKeys, playKeys, release, delay = 0|\n"
@@ -914,8 +1022,10 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "};\n"
                "~markovStepMachine = { if (~markovConfiguredMachine.notNil) { ~markovAdvanceMachine.(~markovConfiguredMachine) } };\n"
                "OSCdef(\\markovLoad, { |msg| ~markovLoad.(msg[1].asString.asSymbol, msg[2].asString); }, '/markov/load');\n"
+               "OSCdef(\\markovLoadFrozen, { |msg| ~markovLoadFrozen.(msg[1].asString.asSymbol, msg[2].asString); }, '/markov/loadFrozen');\n"
                "OSCdef(\\markovCheck, { |msg| ~markovCheck.(msg[1].asString, msg[2].asString, msg[3].asString); }, '/markov/check');\n"
                "OSCdef(\\markovPlay, { |msg| ~markovPlay.(msg[1].asString.asSymbol); }, '/markov/play');\n"
+               "OSCdef(\\markovFreeze, { |msg| ~markovFreeze.(msg[1].asString.asSymbol, msg[2].asString, msg[3].asFloat); }, '/markov/freeze');\n"
                "OSCdef(\\markovRunMachine, { |msg| ~markovRunMachine.(msg[1].asInteger, msg[2].asFloat); }, '/markov/runMachine');\n"
                "OSCdef(\\markovPauseMachine, { ~markovPauseMachine.(); }, '/markov/pauseMachine');\n"
                "OSCdef(\\markovTransition, { |msg|\n"
@@ -959,6 +1069,28 @@ void SuperColliderHost::sendLoadCommand(const juce::String& laneId, const juce::
 
         if (oscConnected)
             oscSender.send ("/markov/load", laneId, scriptPath);
+    }
+
+void SuperColliderHost::sendLoadFrozenCommand (const juce::String& laneId, const juce::String& audioPath)
+    {
+        if (shouldUseCommandFallback())
+            writeCommand ("~markovLoadFrozen.(" + scSymbolLiteral (laneId) + ", " + scStringLiteral (audioPath) + ");\n");
+
+        if (oscConnected)
+            oscSender.send ("/markov/loadFrozen", laneId, audioPath);
+    }
+
+void SuperColliderHost::sendFreezeCommand (const juce::String& laneId, const juce::String& audioPath, double durationSeconds)
+    {
+        const auto duration = juce::jlimit (0.25, 64.0, durationSeconds);
+
+        if (shouldUseCommandFallback())
+            writeCommand ("~markovFreeze.(" + scSymbolLiteral (laneId) + ", "
+                          + scStringLiteral (audioPath) + ", "
+                          + scFloatLiteral (duration) + ");\n");
+
+        if (oscConnected)
+            oscSender.send ("/markov/freeze", laneId, audioPath, static_cast<float> (duration));
     }
 
 void SuperColliderHost::sendPlayCommand(const juce::String& laneId)
