@@ -444,6 +444,23 @@ int SuperColliderHost::getBridgeGeneration() const
         return bridgeGeneration;
     }
 
+void SuperColliderHost::setAudioSettings (const SuperColliderAudioSettings& settings)
+    {
+        const juce::ScopedLock lock (hostLock);
+        SuperColliderAudioSettings sanitized = settings;
+        sanitized.outputDevice = sanitized.outputDevice.trim();
+        sanitized.sampleRate = sanitized.sampleRate <= 0.0 ? 0.0 : juce::jlimit (8000.0, 384000.0, sanitized.sampleRate);
+        sanitized.hardwareBufferSize = juce::jlimit (16, 4096, sanitized.hardwareBufferSize);
+        sanitized.outputChannels = juce::jlimit (1, 64, sanitized.outputChannels);
+
+        if (audioSettings == sanitized)
+            return;
+
+        audioSettings = sanitized;
+        addLog ("SuperCollider audio settings changed; restarting bridge on next audio action");
+        shutdown();
+    }
+
 void SuperColliderHost::panic(MachineModel& model)
     {
         const juce::ScopedLock lock (hostLock);
@@ -604,15 +621,24 @@ juce::String SuperColliderHost::makeBridgeScript() const
         const auto commandPath = scStringLiteral (commandDirectory.getFullPathName());
         constexpr auto profile = getAudioProfile();
         const auto latency = juce::String (profile.serverLatencySeconds, 4);
-        const auto bufferSize = juce::String (profile.hardwareBufferSize);
+        const auto bufferSize = juce::String (juce::jlimit (16, 4096, audioSettings.hardwareBufferSize));
+        const auto outputChannels = juce::String (juce::jlimit (1, 64, audioSettings.outputChannels));
         const auto crossfade = juce::String (enableHiddenCrossfades ? profile.crossfadeSeconds : 0.0, 4);
         const auto defaultRelease = juce::String (musicalReleaseSeconds, 3);
         const auto attack = juce::String (0.120, 3);
+        juce::String deviceLine;
+        if (audioSettings.outputDevice.trim().isNotEmpty())
+            deviceLine = "s.options.device = " + scStringLiteral (audioSettings.outputDevice.trim()) + ";\n";
+        juce::String sampleRateLine;
+        if (audioSettings.sampleRate > 0.0)
+            sampleRateLine = "s.options.sampleRate = " + juce::String (audioSettings.sampleRate, 1) + ";\n";
 
         return "(\n"
                "Server.default.latency = " + latency + ";\n"
+               + deviceLine
+               + sampleRateLine +
                "s.options.hardwareBufferSize = " + bufferSize + ";\n"
-               "s.options.numOutputBusChannels = 2;\n"
+               "s.options.numOutputBusChannels = " + outputChannels + ";\n"
                "s.options.memSize = 262144;\n"
                "s.boot;\n"
                "~markovFade = " + crossfade + ";\n"

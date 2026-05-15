@@ -16,24 +16,43 @@
 
 namespace
 {
-juce::Colour backgroundTop() { return juce::Colour (0xff111318); }
-juce::Colour backgroundBottom() { return juce::Colour (0xff20242b); }
+juce::Colour backgroundTop() { return juce::Colour (0xff13161a); }
+juce::Colour backgroundBottom() { return juce::Colour (0xff191d22); }
 juce::Colour ink() { return juce::Colour (0xfff2efe7); }
 juce::Colour mutedInk() { return juce::Colour (0xffaeb5bd); }
 juce::Colour accentA() { return juce::Colour (0xffffc857); }
 juce::Colour accentB() { return juce::Colour (0xff52d1dc); }
 juce::Colour accentC() { return juce::Colour (0xfff76f8e); }
-juce::Colour inspectedFill() { return juce::Colour (0xff1c3139); }
+juce::Colour inspectedFill() { return juce::Colour (0xff1b2429); }
+juce::Colour panelFill() { return juce::Colour (0xff181c21); }
+juce::Colour rowFill() { return juce::Colour (0xff20252b); }
+juce::Colour hairline() { return juce::Colour (0xff334049); }
+bool colourblindSafePalette = false;
+
+void setColourblindSafePalette (bool shouldUse)
+{
+    colourblindSafePalette = shouldUse;
+}
 
 juce::Colour paletteColour (int index)
 {
-    static constexpr juce::uint32 colours[] =
+    static constexpr juce::uint32 rainbowColours[] =
     {
-        0xffffc857, 0xff52d1dc, 0xff7bd88f, 0xffff9f68,
-        0xfff76f8e, 0xff64b5f6, 0xfffff06a, 0xff5ee6a8
+        0xfff2c14e, 0xff5fb7d9, 0xff80c987, 0xffdd9564,
+        0xffd56f8a, 0xff78aee6, 0xffd9d26b, 0xff6fc6a4
     };
 
-    return juce::Colour (colours[static_cast<size_t> (index) % std::size (colours)]);
+    // Okabe-Ito inspired colours, chosen to stay distinct for common colour vision deficiencies.
+    static constexpr juce::uint32 safeColours[] =
+    {
+        0xffe69f00, 0xff56b4e9, 0xff009e73, 0xfff0e442,
+        0xff0072b2, 0xffd55e00, 0xffcc79a7, 0xff999999
+    };
+
+    const auto* colours = colourblindSafePalette ? safeColours : rainbowColours;
+    const auto count = static_cast<int> (std::size (rainbowColours));
+    const auto wrapped = (index % count + count) % count;
+    return juce::Colour (colours[static_cast<size_t> (wrapped)]);
 }
 
 juce::Colour graphColour (int index, int offset = 0)
@@ -43,7 +62,7 @@ juce::Colour graphColour (int index, int offset = 0)
 
 juce::Colour transitionColourFor (int index)
 {
-    return graphColour (index).interpolatedWith (mutedInk(), 0.34f);
+    return graphColour (index).interpolatedWith (mutedInk(), 0.54f);
 }
 } // namespace
 
@@ -195,9 +214,10 @@ public:
     void paint (juce::Graphics& g) override
     {
         auto bounds = getLocalBounds().toFloat();
-        juce::ColourGradient bg (backgroundTop(), bounds.getTopLeft(), backgroundBottom(), bounds.getBottomRight(), false);
-        g.setGradientFill (bg);
-        g.fillRoundedRectangle (bounds.reduced (2.0f), 8.0f);
+        g.setColour (backgroundTop().interpolatedWith (backgroundBottom(), 0.55f));
+        g.fillRoundedRectangle (bounds.reduced (2.0f), 6.0f);
+        g.setColour (hairline().withAlpha (0.26f));
+        g.drawRoundedRectangle (bounds.reduced (2.0f), 6.0f, 1.0f);
 
         layoutStates();
         drawRules (g);
@@ -540,18 +560,18 @@ private:
 
             const auto fromSelected = rule.from == machine->selectedState;
             const auto toPreviewed = rule.to == previewStateIndex;
-            const auto lineAlpha = (fromSelected || toPreviewed) ? 0.50f : 0.22f;
-            const auto lineWidth = (fromSelected || toPreviewed) ? 2.8f : 1.8f;
+            const auto lineAlpha = (fromSelected || toPreviewed) ? 0.42f : 0.16f;
+            const auto lineWidth = (fromSelected || toPreviewed) ? 2.2f : 1.35f;
             const auto sourceColour = transitionColourFor (rule.from);
-            const auto targetColour = graphColour (rule.to).interpolatedWith (ink(), 0.14f);
-            g.setColour ((fromSelected ? targetColour : sourceColour).withAlpha (lineAlpha + juce::jlimit (0.0f, 0.18f, rule.weight * 0.035f)));
-            g.strokePath (curve, juce::PathStrokeType (lineWidth + juce::jlimit (0.0f, 1.6f, rule.weight * 0.24f),
+            const auto targetColour = graphColour (rule.to).interpolatedWith (mutedInk(), 0.28f);
+            g.setColour ((fromSelected ? targetColour : sourceColour).withAlpha (lineAlpha + juce::jlimit (0.0f, 0.10f, rule.weight * 0.020f)));
+            g.strokePath (curve, juce::PathStrokeType (lineWidth + juce::jlimit (0.0f, 0.9f, rule.weight * 0.14f),
                                                        juce::PathStrokeType::curved,
                                                        juce::PathStrokeType::rounded));
 
             auto arrowPoint = from + (to - from) * 0.78f;
-            const auto dotRadius = (fromSelected || toPreviewed) ? 3.3f : 2.6f;
-            g.setColour ((toPreviewed ? graphColour (rule.to) : (fromSelected ? targetColour : sourceColour)).withAlpha ((fromSelected || toPreviewed) ? 0.82f : 0.50f));
+            const auto dotRadius = (fromSelected || toPreviewed) ? 2.7f : 2.0f;
+            g.setColour ((toPreviewed ? graphColour (rule.to) : (fromSelected ? targetColour : sourceColour)).withAlpha ((fromSelected || toPreviewed) ? 0.72f : 0.36f));
             g.fillEllipse (arrowPoint.x - dotRadius, arrowPoint.y - dotRadius, dotRadius * 2.0f, dotRadius * 2.0f);
         }
     }
@@ -578,30 +598,20 @@ private:
             auto laneCount = machine->getLaneCount (i);
             const auto stateColour = graphColour (i);
 
-            juce::ColourGradient glow ((selected ? stateColour.withAlpha (0.48f) : (previewed ? stateColour.withAlpha (0.34f) : stateColour.withAlpha (0.12f))),
-                                       p.translated (-stateRadius, -stateRadius),
-                                       juce::Colours::transparentBlack,
-                                       p.translated (stateRadius, stateRadius),
-                                       true);
-            g.setGradientFill (glow);
-            g.fillEllipse (p.x - stateRadius * 1.55f, p.y - stateRadius * 1.55f, stateRadius * 3.1f, stateRadius * 3.1f);
+            g.setColour (stateColour.withAlpha (selected ? 0.16f : (previewed ? 0.11f : 0.045f)));
+            g.fillEllipse (p.x - stateRadius * 1.34f, p.y - stateRadius * 1.34f, stateRadius * 2.68f, stateRadius * 2.68f);
 
             if (selected)
             {
-                juce::ColourGradient liveGlow (accentB().withAlpha (0.34f),
-                                               p.translated (-stateRadius * 1.7f, -stateRadius * 1.7f),
-                                               juce::Colours::transparentBlack,
-                                               p.translated (stateRadius * 1.7f, stateRadius * 1.7f),
-                                               true);
-                g.setGradientFill (liveGlow);
-                g.fillEllipse (p.x - stateRadius * 1.9f, p.y - stateRadius * 1.9f, stateRadius * 3.8f, stateRadius * 3.8f);
+                g.setColour (accentB().withAlpha (0.10f));
+                g.fillEllipse (p.x - stateRadius * 1.58f, p.y - stateRadius * 1.58f, stateRadius * 3.16f, stateRadius * 3.16f);
             }
 
-            g.setColour (selected ? stateColour.darker (0.74f).withAlpha (0.98f) : juce::Colour (0xff252a31).interpolatedWith (stateColour, 0.08f));
+            g.setColour (selected ? panelFill().interpolatedWith (stateColour, 0.22f) : panelFill().interpolatedWith (stateColour, 0.045f));
             g.fillEllipse (p.x - stateRadius, p.y - stateRadius, stateRadius * 2.0f, stateRadius * 2.0f);
 
-            g.setColour ((selected ? stateColour.brighter (0.24f) : stateColour.interpolatedWith (mutedInk(), 0.28f)).withAlpha (selected ? 0.98f : 0.82f));
-            g.drawEllipse (p.x - stateRadius, p.y - stateRadius, stateRadius * 2.0f, stateRadius * 2.0f, selected ? 3.0f : 1.5f);
+            g.setColour ((selected ? stateColour.brighter (0.12f) : hairline().interpolatedWith (stateColour, 0.22f)).withAlpha (selected ? 0.92f : 0.70f));
+            g.drawEllipse (p.x - stateRadius, p.y - stateRadius, stateRadius * 2.0f, stateRadius * 2.0f, selected ? 2.3f : 1.1f);
             if (selected)
                 drawActiveStateRing (g, p);
             if (previewed)
@@ -612,8 +622,8 @@ private:
             if (child != nullptr)
             {
                 auto nestedRadius = stateRadius + 7.0f;
-                g.setColour (graphColour (i, 2).withAlpha (selected ? 0.82f : 0.50f));
-                g.drawEllipse (p.x - nestedRadius, p.y - nestedRadius, nestedRadius * 2.0f, nestedRadius * 2.0f, 2.0f);
+                g.setColour (graphColour (i, 2).withAlpha (selected ? 0.58f : 0.32f));
+                g.drawEllipse (p.x - nestedRadius, p.y - nestedRadius, nestedRadius * 2.0f, nestedRadius * 2.0f, 1.4f);
                 drawNestedIndicator (g, *child, p, selected, child == inspectedMachine);
             }
 
@@ -1249,7 +1259,7 @@ public:
 
     void paint (juce::Graphics& g) override
     {
-        g.fillAll (juce::Colour (0xff181b20));
+        g.fillAll (panelFill());
         g.setColour (ink());
         g.setFont (juce::FontOptions (15.0f, juce::Font::bold));
         g.drawText ("Transition rules", getLocalBounds().removeFromTop (28), juce::Justification::centredLeft);
@@ -1264,23 +1274,23 @@ public:
             const auto selected = i == selectedRuleIndex;
             const auto fromColour = graphColour (r.from);
             const auto toColour = graphColour (r.to);
-            g.setColour (selected ? juce::Colour (0xff20252c).interpolatedWith (fromColour, 0.22f)
-                                  : (i % 2 == 0 ? juce::Colour (0xff20252c) : juce::Colour (0xff1b2026)));
-            g.fillRoundedRectangle (row.toFloat().reduced (1.0f), 4.0f);
+            g.setColour (selected ? rowFill().interpolatedWith (fromColour, 0.14f)
+                                  : (i % 2 == 0 ? rowFill().withAlpha (0.76f) : panelFill().brighter (0.02f)));
+            g.fillRoundedRectangle (row.toFloat().reduced (1.0f), 3.0f);
             if (selected)
             {
-                g.setColour (fromColour.withAlpha (0.92f));
-                g.fillRoundedRectangle (row.removeFromLeft (4).toFloat().reduced (0.0f, 4.0f), 2.0f);
+                g.setColour (fromColour.withAlpha (0.76f));
+                g.fillRoundedRectangle (row.removeFromLeft (3).toFloat().reduced (0.0f, 4.0f), 1.5f);
             }
 
             g.setColour (selected ? ink() : mutedInk());
 
             auto rowArea = row.reduced (8, 0);
-            g.setColour (selected ? fromColour.brighter (0.14f) : fromColour.withAlpha (0.74f));
+            g.setColour (selected ? fromColour.brighter (0.08f) : mutedInk().withAlpha (0.78f));
             g.drawText (machine->state (r.from).name, rowArea.removeFromLeft (96), juce::Justification::centredLeft);
             g.setColour (mutedInk().withAlpha (0.72f));
             g.drawText ("->", rowArea.removeFromLeft (24), juce::Justification::centred);
-            g.setColour (selected ? toColour.brighter (0.14f) : toColour.withAlpha (0.74f));
+            g.setColour (selected ? toColour.brighter (0.08f) : mutedInk().withAlpha (0.78f));
             g.drawText (machine->state (r.to).name, rowArea.removeFromLeft (96), juce::Justification::centredLeft);
             g.setColour (selected ? ink() : mutedInk());
             g.drawText ("w " + juce::String (r.weight, 1), rowArea.removeFromRight (52), juce::Justification::centredRight);
@@ -1422,8 +1432,7 @@ public:
 
     void paint (juce::Graphics& g) override
     {
-        g.setColour (juce::Colour (0xff181b20));
-        g.fillRoundedRectangle (getLocalBounds().toFloat(), 7.0f);
+        g.setColour (juce::Colours::transparentBlack);
     }
 
     void resized() override
@@ -1431,19 +1440,19 @@ public:
         if (buttons.empty())
             return;
 
-        auto area = getLocalBounds().reduced (3);
+        auto area = getLocalBounds().reduced (5, 4);
         auto width = area.getWidth() / static_cast<int> (buttons.size());
 
         for (int i = 0; i < static_cast<int> (buttons.size()); ++i)
         {
             auto cell = area.removeFromLeft (i == static_cast<int> (buttons.size()) - 1 ? area.getWidth() : width);
             const auto stateColour = graphColour (i);
-            buttons[static_cast<size_t> (i)]->setBounds (cell.reduced (2, 1));
+            buttons[static_cast<size_t> (i)]->setBounds (cell.reduced (3, 1));
             buttons[static_cast<size_t> (i)]->setColour (juce::TextButton::buttonColourId,
-                                                         i == selectedIndex ? stateColour.darker (0.62f) : juce::Colour (0xff252a31).interpolatedWith (stateColour, 0.08f));
-            buttons[static_cast<size_t> (i)]->setColour (juce::TextButton::buttonOnColourId, stateColour.darker (0.55f));
+                                                         i == selectedIndex ? rowFill().interpolatedWith (stateColour, 0.20f) : juce::Colour (0xff1a1f24).interpolatedWith (stateColour, 0.025f));
+            buttons[static_cast<size_t> (i)]->setColour (juce::TextButton::buttonOnColourId, rowFill().interpolatedWith (stateColour, 0.24f));
             buttons[static_cast<size_t> (i)]->setColour (juce::TextButton::textColourOffId,
-                                                         i == selectedIndex ? stateColour.brighter (0.25f) : mutedInk());
+                                                         i == selectedIndex ? stateColour.brighter (0.14f) : mutedInk().withAlpha (0.78f));
         }
     }
 
@@ -1469,8 +1478,8 @@ public:
     void paint (juce::Graphics& g) override
     {
         auto bounds = getLocalBounds().toFloat();
-        g.setColour (juce::Colour (0xff171b20));
-        g.fillRoundedRectangle (bounds, 6.0f);
+        g.setColour (panelFill());
+        g.fillRoundedRectangle (bounds, 5.0f);
 
         g.setColour (ink());
         g.setFont (juce::FontOptions (12.5f, juce::Font::bold));
@@ -1486,10 +1495,10 @@ public:
             if (selected)
             {
                 const auto rowColour = graphColour (row.stateIndex, row.depth * 2);
-                g.setColour (inspectedFill().interpolatedWith (rowColour, 0.22f).withAlpha (0.95f));
-                g.fillRoundedRectangle (r.reduced (2.0f, 1.0f), 4.0f);
-                g.setColour (rowColour.withAlpha (0.86f));
-                g.drawRoundedRectangle (r.reduced (2.0f, 1.0f), 4.0f, 1.2f);
+                g.setColour (inspectedFill().interpolatedWith (rowColour, 0.12f).withAlpha (0.95f));
+                g.fillRoundedRectangle (r.reduced (2.0f, 1.0f), 3.0f);
+                g.setColour (rowColour.withAlpha (0.62f));
+                g.drawRoundedRectangle (r.reduced (2.0f, 1.0f), 3.0f, 0.8f);
             }
 
             const auto dotX = static_cast<float> (row.bounds.getX() + 10 + row.depth * 14);
@@ -1608,8 +1617,8 @@ public:
     void paint (juce::Graphics& g) override
     {
         auto bounds = getLocalBounds();
-        g.setColour (juce::Colour (0xff181b20));
-        g.fillRoundedRectangle (bounds.toFloat(), 7.0f);
+        g.setColour (panelFill());
+        g.fillRoundedRectangle (bounds.toFloat(), 5.0f);
 
         if (state == nullptr)
             return;
@@ -1629,21 +1638,21 @@ public:
                 const auto selected = i == selectedIndex;
 
                 const auto laneColour = getTrackColour (i);
-                g.setColour (selected ? juce::Colour (0xff20252c).interpolatedWith (laneColour, 0.24f)
-                                      : juce::Colour (0xff20252c).interpolatedWith (laneColour, 0.05f).withAlpha (lane.enabled ? 1.0f : 0.48f));
-                g.fillRoundedRectangle (row.toFloat(), 5.0f);
+                g.setColour (selected ? rowFill().interpolatedWith (laneColour, 0.14f)
+                                      : rowFill().interpolatedWith (laneColour, 0.025f).withAlpha (lane.enabled ? 0.88f : 0.42f));
+                g.fillRoundedRectangle (row.toFloat(), 4.0f);
                 if (selected)
                 {
-                    g.setColour (laneColour.withAlpha (0.45f));
-                    g.fillRoundedRectangle (row.withWidth (5).toFloat(), 3.0f);
+                    g.setColour (laneColour.withAlpha (0.70f));
+                    g.fillRoundedRectangle (row.withWidth (3).toFloat(), 2.0f);
                 }
 
-                g.setColour (selected ? laneColour.withAlpha (0.95f) : juce::Colour (0xff414a55));
-                g.drawRoundedRectangle (row.toFloat(), 5.0f, selected ? 1.4f : 0.8f);
+                g.setColour (selected ? laneColour.withAlpha (0.72f) : hairline().withAlpha (0.62f));
+                g.drawRoundedRectangle (row.toFloat(), 4.0f, selected ? 1.0f : 0.7f);
 
                 auto rowText = row.reduced (10, 0);
                 auto dotArea = rowText.removeFromLeft (12).withSizeKeepingCentre (8, 8).toFloat();
-                g.setColour (laneColour.withAlpha (lane.enabled ? (lane.playing ? 0.96f : 0.72f) : 0.28f));
+                g.setColour (laneColour.withAlpha (lane.enabled ? (lane.playing ? 0.88f : 0.62f) : 0.24f));
                 g.fillEllipse (dotArea);
                 g.setColour (lane.playing ? ink().withAlpha (0.85f) : juce::Colour (0xff101318).withAlpha (0.8f));
                 g.drawEllipse (dotArea.expanded (1.0f), lane.playing ? 1.4f : 0.8f);
@@ -1884,8 +1893,8 @@ public:
     void paint (juce::Graphics& g) override
     {
         auto bounds = getLocalBounds();
-        g.setColour (juce::Colour (0xff181b20));
-        g.fillRoundedRectangle (bounds.toFloat(), 7.0f);
+        g.setColour (panelFill());
+        g.fillRoundedRectangle (bounds.toFloat(), 5.0f);
 
         if (state == nullptr)
             return;
@@ -2036,11 +2045,11 @@ private:
         const auto peakLevel = meterToDisplay (meter.peak);
         const auto active = meter.live && meter.peak > 0.0015f;
 
-        g.setColour (selected ? juce::Colour (0xff20252c).interpolatedWith (laneColour, 0.24f)
-                              : juce::Colour (0xff20252c).interpolatedWith (laneColour, 0.05f).withAlpha (lane.enabled ? 1.0f : 0.48f));
-        g.fillRoundedRectangle (row.toFloat(), 6.0f);
-        g.setColour ((selected ? laneColour : juce::Colour (0xff414a55)).withAlpha (selected ? 0.95f : 0.75f));
-        g.drawRoundedRectangle (row.toFloat(), 6.0f, selected ? 1.5f : 0.8f);
+        g.setColour (selected ? rowFill().interpolatedWith (laneColour, 0.14f)
+                              : rowFill().interpolatedWith (laneColour, 0.025f).withAlpha (lane.enabled ? 0.88f : 0.42f));
+        g.fillRoundedRectangle (row.toFloat(), 4.0f);
+        g.setColour ((selected ? laneColour : hairline()).withAlpha (selected ? 0.72f : 0.62f));
+        g.drawRoundedRectangle (row.toFloat(), 4.0f, selected ? 1.0f : 0.7f);
 
         auto top = row.reduced (10, 4).removeFromTop (22);
         auto buttons = getButtonBounds (row);
@@ -2644,10 +2653,30 @@ private:
 class AudioSettingsComponent final : public juce::Component
 {
 public:
-    explicit AudioSettingsComponent (juce::AudioDeviceManager& manager)
-        : selector (manager, 0, 0, 0, 2, false, false, true, false)
+    AudioSettingsComponent (juce::AudioDeviceManager& manager,
+                            bool colourblindSafeEnabled,
+                            std::function<void (bool)> colourblindSafeChanged,
+                            SuperColliderAudioSettings scAudioSettingsToUse,
+                            std::function<void (SuperColliderAudioSettings)> scAudioSettingsChanged)
+        : onColourblindSafeChanged (std::move (colourblindSafeChanged)),
+          onScAudioSettingsChanged (std::move (scAudioSettingsChanged)),
+          scAudioSettings (std::move (scAudioSettingsToUse)),
+          selector (manager, 0, 0, 0, 2, false, false, true, false)
     {
         addAndMakeVisible (title);
+        addAndMakeVisible (colourSectionTitle);
+        addAndMakeVisible (colourblindSafeToggle);
+        addAndMakeVisible (scSectionTitle);
+        addAndMakeVisible (scDeviceLabel);
+        addAndMakeVisible (scDeviceEditor);
+        addAndMakeVisible (scSampleRateLabel);
+        addAndMakeVisible (scSampleRateEditor);
+        addAndMakeVisible (scBufferLabel);
+        addAndMakeVisible (scBufferEditor);
+        addAndMakeVisible (scChannelsLabel);
+        addAndMakeVisible (scChannelsEditor);
+        addAndMakeVisible (scNote);
+        addAndMakeVisible (audioSectionTitle);
         addAndMakeVisible (note);
         addAndMakeVisible (selector);
 
@@ -2655,14 +2684,78 @@ public:
         title.setFont (juce::FontOptions (21.0f, juce::Font::bold));
         title.setColour (juce::Label::textColourId, ink());
 
-        note.setText ("Audio device settings for the app. SuperCollider output follows its own server/system audio routing until dedicated SC device selection is added.",
+        colourSectionTitle.setText ("Appearance", juce::dontSendNotification);
+        colourSectionTitle.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+        colourSectionTitle.setColour (juce::Label::textColourId, mutedInk());
+        colourblindSafeToggle.setButtonText ("Colourblind-safe colours");
+        colourblindSafeToggle.setToggleState (colourblindSafeEnabled, juce::dontSendNotification);
+        colourblindSafeToggle.setColour (juce::ToggleButton::textColourId, ink());
+        colourblindSafeToggle.setColour (juce::ToggleButton::tickColourId, accentA());
+        colourblindSafeToggle.setColour (juce::ToggleButton::tickDisabledColourId, mutedInk().withAlpha (0.40f));
+        colourblindSafeToggle.onClick = [this]
+        {
+            if (onColourblindSafeChanged)
+                onColourblindSafeChanged (colourblindSafeToggle.getToggleState());
+        };
+
+        scSectionTitle.setText ("SuperCollider audio", juce::dontSendNotification);
+        audioSectionTitle.setText ("JUCE audio devices", juce::dontSendNotification);
+        for (auto* label : { &scSectionTitle, &audioSectionTitle })
+        {
+            label->setFont (juce::FontOptions (12.0f, juce::Font::bold));
+            label->setColour (juce::Label::textColourId, mutedInk());
+        }
+
+        scDeviceLabel.setText ("Output device", juce::dontSendNotification);
+        scSampleRateLabel.setText ("Sample rate", juce::dontSendNotification);
+        scBufferLabel.setText ("Buffer", juce::dontSendNotification);
+        scChannelsLabel.setText ("Outs", juce::dontSendNotification);
+        for (auto* label : { &scDeviceLabel, &scSampleRateLabel, &scBufferLabel, &scChannelsLabel })
+        {
+            label->setFont (juce::FontOptions (12.0f, juce::Font::bold));
+            label->setColour (juce::Label::textColourId, mutedInk());
+            label->setJustificationType (juce::Justification::centredLeft);
+        }
+
+        configureSettingsEditor (scDeviceEditor);
+        configureSettingsEditor (scSampleRateEditor);
+        configureSettingsEditor (scBufferEditor);
+        configureSettingsEditor (scChannelsEditor);
+        scSampleRateEditor.setInputRestrictions (8, "0123456789.");
+        scBufferEditor.setInputRestrictions (4, "0123456789");
+        scChannelsEditor.setInputRestrictions (2, "0123456789");
+
+        scDeviceEditor.setText (scAudioSettings.outputDevice, false);
+        scSampleRateEditor.setText (scAudioSettings.sampleRate <= 0.0 ? juce::String() : juce::String (scAudioSettings.sampleRate, 1), false);
+        scBufferEditor.setText (juce::String (scAudioSettings.hardwareBufferSize), false);
+        scChannelsEditor.setText (juce::String (scAudioSettings.outputChannels), false);
+
+        scDeviceEditor.onReturnKey = [this] { commitScAudioSettings(); };
+        scDeviceEditor.onFocusLost = [this] { commitScAudioSettings(); };
+        scSampleRateEditor.onReturnKey = [this] { commitScAudioSettings(); };
+        scSampleRateEditor.onFocusLost = [this] { commitScAudioSettings(); };
+        scBufferEditor.onReturnKey = [this] { commitScAudioSettings(); };
+        scBufferEditor.onFocusLost = [this] { commitScAudioSettings(); };
+        scChannelsEditor.onReturnKey = [this] { commitScAudioSettings(); };
+        scChannelsEditor.onFocusLost = [this] { commitScAudioSettings(); };
+
+        scNote.setText ("Leave output device blank to use SuperCollider's default. Changes restart the SC bridge on the next audio action.",
+                        juce::dontSendNotification);
+        scNote.setFont (juce::FontOptions (11.5f));
+        scNote.setColour (juce::Label::textColourId, mutedInk());
+        scNote.setJustificationType (juce::Justification::centredLeft);
+
+        audioSectionTitle.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+        audioSectionTitle.setColour (juce::Label::textColourId, mutedInk());
+
+        note.setText ("JUCE device settings are kept for app-side audio features. Live script output is controlled by the SuperCollider settings above.",
                       juce::dontSendNotification);
         note.setFont (juce::FontOptions (12.5f));
         note.setColour (juce::Label::textColourId, mutedInk());
         note.setJustificationType (juce::Justification::centredLeft);
 
         selector.setItemHeight (24);
-        setSize (520, 470);
+        setSize (590, 680);
     }
 
     void paint (juce::Graphics& g) override
@@ -2676,13 +2769,82 @@ public:
     {
         auto area = getLocalBounds().reduced (18, 16);
         title.setBounds (area.removeFromTop (30));
+        area.removeFromTop (10);
+        colourSectionTitle.setBounds (area.removeFromTop (22));
+        colourblindSafeToggle.setBounds (area.removeFromTop (28).reduced (0, 2));
+        area.removeFromTop (12);
+        scSectionTitle.setBounds (area.removeFromTop (22));
+        auto deviceRow = area.removeFromTop (32);
+        scDeviceLabel.setBounds (deviceRow.removeFromLeft (102).reduced (0, 4));
+        scDeviceEditor.setBounds (deviceRow.reduced (0, 3));
+        auto numericRow = area.removeFromTop (32);
+        scSampleRateLabel.setBounds (numericRow.removeFromLeft (86).reduced (0, 4));
+        scSampleRateEditor.setBounds (numericRow.removeFromLeft (78).reduced (0, 3));
+        numericRow.removeFromLeft (12);
+        scBufferLabel.setBounds (numericRow.removeFromLeft (48).reduced (0, 4));
+        scBufferEditor.setBounds (numericRow.removeFromLeft (58).reduced (0, 3));
+        numericRow.removeFromLeft (12);
+        scChannelsLabel.setBounds (numericRow.removeFromLeft (34).reduced (0, 4));
+        scChannelsEditor.setBounds (numericRow.removeFromLeft (42).reduced (0, 3));
+        scNote.setBounds (area.removeFromTop (40));
+        area.removeFromTop (10);
+        audioSectionTitle.setBounds (area.removeFromTop (22));
         note.setBounds (area.removeFromTop (54));
         area.removeFromTop (8);
         selector.setBounds (area);
     }
 
 private:
+    static void configureSettingsEditor (juce::TextEditor& editor)
+    {
+        editor.setMultiLine (false);
+        editor.setFont (juce::FontOptions (12.5f));
+        editor.setColour (juce::TextEditor::backgroundColourId, juce::Colour (0xff111318));
+        editor.setColour (juce::TextEditor::textColourId, ink());
+        editor.setColour (juce::TextEditor::outlineColourId, hairline());
+        editor.setColour (juce::TextEditor::focusedOutlineColourId, accentA());
+    }
+
+    void commitScAudioSettings()
+    {
+        SuperColliderAudioSettings updated;
+        updated.outputDevice = scDeviceEditor.getText().trim();
+        updated.sampleRate = scSampleRateEditor.getText().trim().isEmpty() ? 0.0 : scSampleRateEditor.getText().getDoubleValue();
+        updated.hardwareBufferSize = scBufferEditor.getText().getIntValue();
+        updated.outputChannels = scChannelsEditor.getText().getIntValue();
+        updated.sampleRate = updated.sampleRate <= 0.0 ? 0.0 : juce::jlimit (8000.0, 384000.0, updated.sampleRate);
+        updated.hardwareBufferSize = juce::jlimit (16, 4096, updated.hardwareBufferSize <= 0 ? 64 : updated.hardwareBufferSize);
+        updated.outputChannels = juce::jlimit (1, 64, updated.outputChannels <= 0 ? 2 : updated.outputChannels);
+
+        scSampleRateEditor.setText (updated.sampleRate <= 0.0 ? juce::String() : juce::String (updated.sampleRate, 1), false);
+        scBufferEditor.setText (juce::String (updated.hardwareBufferSize), false);
+        scChannelsEditor.setText (juce::String (updated.outputChannels), false);
+
+        if (updated == scAudioSettings)
+            return;
+
+        scAudioSettings = updated;
+        if (onScAudioSettingsChanged)
+            onScAudioSettingsChanged (scAudioSettings);
+    }
+
+    std::function<void (bool)> onColourblindSafeChanged;
+    std::function<void (SuperColliderAudioSettings)> onScAudioSettingsChanged;
+    SuperColliderAudioSettings scAudioSettings;
     juce::Label title;
+    juce::Label colourSectionTitle;
+    juce::ToggleButton colourblindSafeToggle;
+    juce::Label scSectionTitle;
+    juce::Label scDeviceLabel;
+    juce::TextEditor scDeviceEditor;
+    juce::Label scSampleRateLabel;
+    juce::TextEditor scSampleRateEditor;
+    juce::Label scBufferLabel;
+    juce::TextEditor scBufferEditor;
+    juce::Label scChannelsLabel;
+    juce::TextEditor scChannelsEditor;
+    juce::Label scNote;
+    juce::Label audioSectionTitle;
     juce::Label note;
     juce::AudioDeviceSelectorComponent selector;
 };
@@ -2690,13 +2852,21 @@ private:
 class SettingsWindow final : public juce::DocumentWindow
 {
 public:
-    explicit SettingsWindow (juce::AudioDeviceManager& manager)
+    SettingsWindow (juce::AudioDeviceManager& manager,
+                    bool colourblindSafeEnabled,
+                    std::function<void (bool)> colourblindSafeChanged,
+                    SuperColliderAudioSettings scAudioSettings,
+                    std::function<void (SuperColliderAudioSettings)> scAudioSettingsChanged)
         : DocumentWindow ("Settings", backgroundTop(), DocumentWindow::closeButton)
     {
         setUsingNativeTitleBar (true);
-        setContentOwned (new AudioSettingsComponent (manager), true);
+        setContentOwned (new AudioSettingsComponent (manager,
+                                                     colourblindSafeEnabled,
+                                                     std::move (colourblindSafeChanged),
+                                                     std::move (scAudioSettings),
+                                                     std::move (scAudioSettingsChanged)), true);
         setResizable (false, false);
-        centreWithSize (520, 470);
+        centreWithSize (590, 680);
     }
 
     void closeButtonPressed() override
@@ -2910,9 +3080,9 @@ public:
         };
 
         statusLabel.setText ("Audio offline", juce::dontSendNotification);
-        statusLabel.setFont (juce::FontOptions (13.0f));
+        statusLabel.setFont (juce::FontOptions (12.0f, juce::Font::bold));
         statusLabel.setColour (juce::Label::textColourId, mutedInk());
-        statusLabel.setJustificationType (juce::Justification::centredRight);
+        statusLabel.setJustificationType (juce::Justification::centredLeft);
         statusLabel.setMouseCursor (juce::MouseCursor::PointingHandCursor);
         statusLabel.onClick = [this]
         {
@@ -3012,10 +3182,10 @@ public:
         else
             appendLog ("Could not bind visual state OSC port 57142");
 
-        topStateCountLabel.setText ("Top states", juce::dontSendNotification);
+        topStateCountLabel.setText ("States", juce::dontSendNotification);
         topStateCountLabel.setFont (juce::FontOptions (12.5f, juce::Font::bold));
         topStateCountLabel.setColour (juce::Label::textColourId, mutedInk());
-        topStateCountLabel.setJustificationType (juce::Justification::centredRight);
+        topStateCountLabel.setJustificationType (juce::Justification::centredLeft);
 
         topStateCountMinus.setButtonText ("-");
         topStateCountPlus.setButtonText ("+");
@@ -3212,10 +3382,10 @@ public:
         scriptEditor.setTabSize (4, true);
         scriptEditor.setScrollbarThickness (9);
         updateCodeEditorFont();
-        scriptEditor.setColour (juce::CodeEditorComponent::backgroundColourId, juce::Colour (0xff0f1116));
+        scriptEditor.setColour (juce::CodeEditorComponent::backgroundColourId, juce::Colour (0xff111419));
         scriptEditor.setColour (juce::CodeEditorComponent::defaultTextColourId, ink());
         scriptEditor.setColour (juce::CodeEditorComponent::highlightColourId, graphColour (1).withAlpha (0.24f));
-        scriptEditor.setColour (juce::CodeEditorComponent::lineNumberBackgroundId, juce::Colour (0xff111820));
+        scriptEditor.setColour (juce::CodeEditorComponent::lineNumberBackgroundId, juce::Colour (0xff14191f));
         scriptEditor.setColour (juce::CodeEditorComponent::lineNumberTextId, mutedInk().withAlpha (0.52f));
         scriptEditor.setColourScheme (scTokeniser.getDefaultColourScheme());
 
@@ -3519,20 +3689,76 @@ public:
     void showSettings()
     {
         if (settingsWindow == nullptr)
-            settingsWindow = std::make_unique<SettingsWindow> (audioDeviceManager);
+        {
+            settingsWindow = std::make_unique<SettingsWindow> (audioDeviceManager,
+                                                               colourblindSafeMode,
+                                                               [safeThis = juce::Component::SafePointer<MainComponent> (this)] (bool shouldUse)
+                                                               {
+                                                                   if (safeThis != nullptr)
+                                                                       safeThis->setColourblindSafeMode (shouldUse);
+                                                               },
+                                                               scAudioSettings,
+                                                               [safeThis = juce::Component::SafePointer<MainComponent> (this)] (SuperColliderAudioSettings settings)
+                                                               {
+                                                                   if (safeThis != nullptr)
+                                                                       safeThis->setSuperColliderAudioSettings (std::move (settings));
+                                                               });
+        }
 
         settingsWindow->setVisible (true);
         settingsWindow->toFront (true);
     }
 
+    void showAbout()
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::InfoIcon,
+                                                "Markov FSM",
+                                                "By matd.space");
+    }
+
+    void setColourblindSafeMode (bool shouldUse)
+    {
+        if (colourblindSafeMode == shouldUse)
+            return;
+
+        colourblindSafeMode = shouldUse;
+        setColourblindSafePalette (shouldUse);
+        saveAppState();
+        refreshVisualTheme();
+    }
+
+    void setSuperColliderAudioSettings (SuperColliderAudioSettings settings)
+    {
+        settings.outputDevice = settings.outputDevice.trim();
+        settings.sampleRate = settings.sampleRate <= 0.0 ? 0.0 : juce::jlimit (8000.0, 384000.0, settings.sampleRate);
+        settings.hardwareBufferSize = juce::jlimit (16, 4096, settings.hardwareBufferSize <= 0 ? 64 : settings.hardwareBufferSize);
+        settings.outputChannels = juce::jlimit (1, 64, settings.outputChannels <= 0 ? 2 : settings.outputChannels);
+
+        if (scAudioSettings == settings)
+            return;
+
+        fsmRunning = false;
+        stopTransport();
+        host.pauseMachine();
+        host.stopAll (machine);
+        runButton.setButtonText ("Run");
+        scAudioSettings = std::move (settings);
+        host.setAudioSettings (scAudioSettings);
+        machinePrepared = false;
+        statusLabel.setText ("SC audio settings changed", juce::dontSendNotification);
+        saveAppState();
+        refreshControls();
+    }
+
     void paint (juce::Graphics& g) override
     {
-        juce::ColourGradient bg (juce::Colour (0xff0f1013), getLocalBounds().getTopLeft().toFloat(),
-                                 juce::Colour (0xff242830), getLocalBounds().getBottomRight().toFloat(), false);
+        juce::ColourGradient bg (backgroundTop(), getLocalBounds().getTopLeft().toFloat(),
+                                 backgroundBottom(), getLocalBounds().getBottomRight().toFloat(), false);
+        bg.addColour (0.72, juce::Colour (0xff1b2026));
         g.setGradientFill (bg);
         g.fillAll();
 
-        auto strip = getLocalBounds().removeFromTop (3).toFloat();
+        auto strip = getLocalBounds().removeFromTop (2).toFloat();
         juce::ColourGradient rainbow (graphColour (0).withAlpha (0.82f), strip.getTopLeft(),
                                       graphColour (4).withAlpha (0.82f), strip.getTopRight(), false);
         rainbow.addColour (0.18, graphColour (1).withAlpha (0.82f));
@@ -3542,31 +3768,59 @@ public:
         rainbow.addColour (0.88, graphColour (7).withAlpha (0.82f));
         g.setGradientFill (rainbow);
         g.fillRect (strip);
+
+        auto chrome = getLocalBounds().reduced (18);
+        auto header = chrome.removeFromTop (46).toFloat();
+        auto tabs = chrome.removeFromTop (36).toFloat();
+
+        g.setColour (panelFill().withAlpha (0.50f));
+        g.fillRoundedRectangle (header.reduced (0.0f, 3.0f), 5.0f);
+        g.setColour (hairline().withAlpha (0.20f));
+        g.drawRoundedRectangle (header.reduced (0.0f, 3.0f), 5.0f, 1.0f);
+
+        g.setColour (panelFill().withAlpha (0.36f));
+        g.fillRoundedRectangle (tabs.reduced (0.0f, 2.0f), 5.0f);
+        g.setColour (hairline().withAlpha (0.16f));
+        g.drawRoundedRectangle (tabs.reduced (0.0f, 2.0f), 5.0f, 1.0f);
+
+        auto divider = tabs.withY (tabs.getBottom() + 4.0f).withHeight (1.0f).reduced (8.0f, 0.0f);
+        juce::ColourGradient line (juce::Colours::transparentBlack, divider.getTopLeft(),
+                                   hairline().withAlpha (0.42f), divider.getCentre(), false);
+        line.addColour (1.0, juce::Colours::transparentBlack);
+        g.setGradientFill (line);
+        g.fillRect (divider);
     }
 
     void resized() override
     {
         auto area = getLocalBounds().reduced (18);
         auto header = area.removeFromTop (46);
-        title.setBounds (header.removeFromLeft (360));
-        auto topCountArea = header.removeFromRight (188).reduced (0, 8);
-        topStateCountLabel.setBounds (topCountArea.removeFromLeft (76));
-        topStateCountMinus.setBounds (topCountArea.removeFromLeft (28).reduced (2, 0));
-        topStateCountEditor.setBounds (topCountArea.removeFromLeft (42).reduced (2, 0));
-        topStateCountPlus.setBounds (topCountArea.removeFromLeft (28).reduced (2, 0));
-        rateSlider.setBounds (header.removeFromRight (150).reduced (6, 8));
-        graphLayoutButton.setBounds (header.removeFromRight (68).reduced (4, 8));
-        graphFitButton.setBounds (header.removeFromRight (46).reduced (4, 8));
-        logButton.setBounds (header.removeFromRight (56).reduced (4, 8));
-        redoButton.setBounds (header.removeFromRight (60).reduced (4, 8));
-        undoButton.setBounds (header.removeFromRight (62).reduced (4, 8));
-        saveProjectButton.setBounds (header.removeFromRight (62).reduced (4, 8));
-        loadProjectButton.setBounds (header.removeFromRight (62).reduced (4, 8));
-        panicButton.setBounds (header.removeFromRight (74).reduced (4, 8));
-        stopAllButton.setBounds (header.removeFromRight (86).reduced (4, 8));
-        stepButton.setBounds (header.removeFromRight (66).reduced (4, 8));
-        runButton.setBounds (header.removeFromRight (88).reduced (4, 8));
-        statusLabel.setBounds (header.reduced (8, 8));
+        auto headerInner = header.reduced (10, 7);
+        title.setBounds (headerInner.removeFromLeft (226));
+        statusLabel.setBounds (headerInner.removeFromLeft (148).reduced (4, 2));
+
+        auto topCountArea = headerInner.removeFromRight (154);
+        topStateCountLabel.setBounds (topCountArea.removeFromLeft (48).reduced (2, 2));
+        topStateCountMinus.setBounds (topCountArea.removeFromLeft (27).reduced (2, 0));
+        topStateCountEditor.setBounds (topCountArea.removeFromLeft (38).reduced (2, 0));
+        topStateCountPlus.setBounds (topCountArea.removeFromLeft (27).reduced (2, 0));
+        headerInner.removeFromRight (8);
+        rateSlider.setBounds (headerInner.removeFromRight (136).reduced (4, 0));
+        headerInner.removeFromRight (8);
+        graphLayoutButton.setBounds (headerInner.removeFromRight (62).reduced (3, 0));
+        graphFitButton.setBounds (headerInner.removeFromRight (42).reduced (3, 0));
+        logButton.setBounds (headerInner.removeFromRight (50).reduced (3, 0));
+        headerInner.removeFromRight (8);
+        redoButton.setBounds (headerInner.removeFromRight (54).reduced (3, 0));
+        undoButton.setBounds (headerInner.removeFromRight (56).reduced (3, 0));
+        headerInner.removeFromRight (8);
+        saveProjectButton.setBounds (headerInner.removeFromRight (56).reduced (3, 0));
+        loadProjectButton.setBounds (headerInner.removeFromRight (56).reduced (3, 0));
+        headerInner.removeFromRight (8);
+        panicButton.setBounds (headerInner.removeFromRight (68).reduced (3, 0));
+        stopAllButton.setBounds (headerInner.removeFromRight (80).reduced (3, 0));
+        stepButton.setBounds (headerInner.removeFromRight (60).reduced (3, 0));
+        runButton.setBounds (headerInner.removeFromRight (74).reduced (3, 0));
 
         const auto horizontalDividerHeight = 8;
         const auto minGraphHeight = codeExpanded ? 112 : 230;
@@ -3807,10 +4061,10 @@ private:
     void updateInspectorModeButtons()
     {
         const auto tracksActive = inspectorMode == InspectorMode::tracks;
-        tracksModeButton.setColour (juce::TextButton::buttonColourId, tracksActive ? graphColour (0).darker (0.58f) : juce::Colour (0xff252a31).interpolatedWith (graphColour (0), 0.08f));
-        tracksModeButton.setColour (juce::TextButton::textColourOffId, tracksActive ? graphColour (0).brighter (0.18f) : mutedInk());
-        mixerModeButton.setColour (juce::TextButton::buttonColourId, ! tracksActive ? graphColour (1).darker (0.58f) : juce::Colour (0xff252a31).interpolatedWith (graphColour (1), 0.08f));
-        mixerModeButton.setColour (juce::TextButton::textColourOffId, ! tracksActive ? graphColour (1).brighter (0.18f) : mutedInk());
+        tracksModeButton.setColour (juce::TextButton::buttonColourId, tracksActive ? rowFill().interpolatedWith (graphColour (0), 0.18f) : panelFill().brighter (0.04f));
+        tracksModeButton.setColour (juce::TextButton::textColourOffId, tracksActive ? graphColour (0).brighter (0.08f) : mutedInk());
+        mixerModeButton.setColour (juce::TextButton::buttonColourId, ! tracksActive ? rowFill().interpolatedWith (graphColour (1), 0.18f) : panelFill().brighter (0.04f));
+        mixerModeButton.setColour (juce::TextButton::textColourOffId, ! tracksActive ? graphColour (1).brighter (0.08f) : mutedInk());
     }
 
     LaneMeterValues meterForLane (const juce::String& laneId) const
@@ -4129,6 +4383,11 @@ private:
         auto object = new juce::DynamicObject();
         object->setProperty ("lastProject", currentProjectFile.getFullPathName());
         object->setProperty ("lastAutosave", autosaveFile().getFullPathName());
+        object->setProperty ("colourblindSafeMode", colourblindSafeMode);
+        object->setProperty ("scOutputDevice", scAudioSettings.outputDevice);
+        object->setProperty ("scSampleRate", scAudioSettings.sampleRate);
+        object->setProperty ("scHardwareBufferSize", scAudioSettings.hardwareBufferSize);
+        object->setProperty ("scOutputChannels", scAudioSettings.outputChannels);
 
         juce::Array<juce::var> recent;
         for (const auto& path : recentProjects)
@@ -4153,6 +4412,17 @@ private:
         auto lastProject = parsed.getProperty ("lastProject", {}).toString();
         if (lastProject.isNotEmpty())
             currentProjectFile = juce::File (lastProject);
+
+        colourblindSafeMode = static_cast<bool> (parsed.getProperty ("colourblindSafeMode", false));
+        setColourblindSafePalette (colourblindSafeMode);
+        scAudioSettings.outputDevice = parsed.getProperty ("scOutputDevice", {}).toString().trim();
+        scAudioSettings.sampleRate = static_cast<double> (parsed.getProperty ("scSampleRate", 0.0));
+        scAudioSettings.hardwareBufferSize = static_cast<int> (parsed.getProperty ("scHardwareBufferSize", 64));
+        scAudioSettings.outputChannels = static_cast<int> (parsed.getProperty ("scOutputChannels", 2));
+        scAudioSettings.sampleRate = scAudioSettings.sampleRate <= 0.0 ? 0.0 : juce::jlimit (8000.0, 384000.0, scAudioSettings.sampleRate);
+        scAudioSettings.hardwareBufferSize = juce::jlimit (16, 4096, scAudioSettings.hardwareBufferSize <= 0 ? 64 : scAudioSettings.hardwareBufferSize);
+        scAudioSettings.outputChannels = juce::jlimit (1, 64, scAudioSettings.outputChannels <= 0 ? 2 : scAudioSettings.outputChannels);
+        host.setAudioSettings (scAudioSettings);
     }
 
     void restoreLastProject()
@@ -6036,12 +6306,12 @@ private:
         const auto selectedLanePlaying = currentInspectorMachine().selectedLaneRef().playing;
         playButton.setButtonText (selectedLanePlaying ? "Stop" : "Play");
         playButton.setColour (juce::TextButton::buttonColourId,
-                              selectedLanePlaying ? graphColour (currentInspectorMachine().selectedLane, 4).darker (0.28f)
-                                                  : graphColour (currentInspectorMachine().selectedLane).darker (0.36f));
-        runButton.setColour (juce::TextButton::buttonColourId, fsmRunning ? graphColour (machine.selectedState).darker (0.42f)
-                                                                          : juce::Colour (0xff252a31).interpolatedWith (graphColour (machine.selectedState), 0.10f));
-        stepButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff252a31).interpolatedWith (graphColour (machine.selectedState + 1), 0.12f));
-        stopAllButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff252a31).interpolatedWith (graphColour (machine.selectedState + 4), 0.12f));
+                              selectedLanePlaying ? rowFill().interpolatedWith (graphColour (currentInspectorMachine().selectedLane, 4), 0.24f)
+                                                  : rowFill().interpolatedWith (graphColour (currentInspectorMachine().selectedLane), 0.16f));
+        runButton.setColour (juce::TextButton::buttonColourId, fsmRunning ? rowFill().interpolatedWith (graphColour (machine.selectedState), 0.24f)
+                                                                          : rowFill().interpolatedWith (graphColour (machine.selectedState), 0.10f));
+        stepButton.setColour (juce::TextButton::buttonColourId, rowFill().interpolatedWith (graphColour (machine.selectedState + 1), 0.10f));
+        stopAllButton.setColour (juce::TextButton::buttonColourId, rowFill().interpolatedWith (graphColour (machine.selectedState + 4), 0.10f));
         moveLaneUpButton.setEnabled (currentInspectorMachine().selectedLane > 0);
         moveLaneDownButton.setEnabled (currentInspectorMachine().selectedLane < currentInspectorMachine().getLaneCount (currentInspectorMachine().selectedState) - 1);
         duplicateLaneButton.setEnabled (currentInspectorMachine().getLaneCount (currentInspectorMachine().selectedState) > 0);
@@ -6053,6 +6323,18 @@ private:
         rules.repaint();
         graph.setInspectedMachine (&currentInspectorMachine());
         updateTransitionPreview();
+    }
+
+    void refreshVisualTheme()
+    {
+        scriptEditor.setColour (juce::CodeEditorComponent::highlightColourId, graphColour (1).withAlpha (0.24f));
+        updateInspectorModeButtons();
+        refreshStateTabs();
+        refreshTrackList();
+        navigator.repaint();
+        graph.repaint();
+        rules.repaint();
+        repaint();
     }
 
     void refreshStateTabs()
@@ -6190,6 +6472,8 @@ private:
     bool dirtyProject = false;
     bool loadingProjectInternally = false;
     bool suppressUndoCapture = false;
+    bool colourblindSafeMode = false;
+    SuperColliderAudioSettings scAudioSettings;
     juce::String lastProjectSnapshot;
     std::vector<juce::String> undoSnapshots;
     std::vector<juce::String> redoSnapshots;
@@ -6238,7 +6522,8 @@ private:
         loadProjectItem,
         saveProjectItem,
         saveProjectAsItem,
-        settingsItem
+        settingsItem,
+        aboutItem
     };
 
     juce::StringArray getMenuBarNames() override
@@ -6261,6 +6546,8 @@ private:
             menu.addItem (saveProjectAsItem, "Save As...");
             menu.addSeparator();
             menu.addItem (settingsItem, "Settings...");
+            menu.addSeparator();
+            menu.addItem (aboutItem, "About Markov FSM");
         }
 
         return menu;
@@ -6285,6 +6572,7 @@ private:
             case saveProjectItem:    main->saveCurrentProject(); break;
             case saveProjectAsItem:  main->saveProjectAs(); break;
             case settingsItem:       main->showSettings(); break;
+            case aboutItem:          main->showAbout(); break;
             default: break;
         }
     }

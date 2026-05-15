@@ -6,12 +6,34 @@
 #include "FsmModel.h"
 
 #include <atomic>
+#include <cmath>
 #include <functional>
 #include <memory>
 #include <thread>
 #include <vector>
 
 inline constexpr double musicalReleaseSeconds = 1.45;
+
+struct SuperColliderAudioSettings
+{
+    juce::String outputDevice;
+    double sampleRate = 0.0;
+    int hardwareBufferSize = 64;
+    int outputChannels = 2;
+
+    bool operator== (const SuperColliderAudioSettings& other) const
+    {
+        return outputDevice == other.outputDevice
+            && std::abs (sampleRate - other.sampleRate) < 0.001
+            && hardwareBufferSize == other.hardwareBufferSize
+            && outputChannels == other.outputChannels;
+    }
+
+    bool operator!= (const SuperColliderAudioSettings& other) const
+    {
+        return ! (*this == other);
+    }
+};
 
 class SuperColliderHost
 {
@@ -46,6 +68,7 @@ public:
     void testTone (const juce::String& sclangPath);
     juce::String checkScript (const juce::String& script, const juce::String& sclangPath);
     juce::String readCheckResult (const juce::String& checkId) const;
+    void setAudioSettings (const SuperColliderAudioSettings& settings);
 
 private:
     bool ensureBridgeRunning (const juce::String& sclangPath);
@@ -85,6 +108,7 @@ private:
     int bridgeGeneration = 0;
     juce::int64 bridgeStartedAtMs = 0;
     bool oscConnected = false;
+    SuperColliderAudioSettings audioSettings;
     std::atomic<bool> logReaderShouldRun { false };
     std::thread logReader;
     juce::String currentStatus { "Audio offline" };
