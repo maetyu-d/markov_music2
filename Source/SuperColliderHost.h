@@ -47,6 +47,13 @@ public:
     bool prepare (Lane& lane, const juce::String& sclangPath);
     int prepareData (const LaneSnapshot& lane, const juce::String& sclangPath);
     bool freezeLane (Lane& lane, const juce::String& sclangPath, double durationSeconds, const juce::File& outputFile);
+    bool exportMachine (MachineModel& model,
+                        const juce::String& sclangPath,
+                        const juce::File& outputFile,
+                        double durationSeconds,
+                        double rate,
+                        int startState,
+                        const juce::String& sampleFormat);
     void setLaneVolume (Lane& lane);
     void setLaneMix (Lane& lane);
     void setLaneEffectiveVolume (const Lane& lane, float volume);
@@ -65,6 +72,7 @@ public:
     void runMachine (int startState, double rateHz);
     void pauseMachine();
     void stepMachine();
+    void cancelExport();
     void testTone (const juce::String& sclangPath);
     juce::String checkScript (const juce::String& script, const juce::String& sclangPath);
     juce::String readCheckResult (const juce::String& checkId) const;
@@ -78,6 +86,8 @@ private:
     void sendLoadCommand (const juce::String& laneId, const juce::String& scriptPath);
     void sendLoadFrozenCommand (const juce::String& laneId, const juce::String& audioPath);
     void sendFreezeCommand (const juce::String& laneId, const juce::String& audioPath, double durationSeconds);
+    void sendExportCommand (const juce::String& audioPath, double durationSeconds, double rate, int startState, const juce::String& sampleFormat);
+    void sendCancelExportCommand();
     void sendPlayCommand (const juce::String& laneId);
     void sendTransitionCommand (const juce::StringArray& stopIds,
                                 const juce::StringArray& playIds,

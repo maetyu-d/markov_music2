@@ -125,6 +125,22 @@ bool laneShouldPlayInState (const State& state, const Lane& lane)
     return lane.enabled;
 }
 
+bool prepareMachineLanes (SuperColliderHost& host, MachineModel& model, const juce::String& sclangPath)
+{
+    for (auto& state : model.states)
+    {
+        for (auto& lane : state.lanes)
+            if (! host.prepare (lane, sclangPath))
+                return false;
+
+        if (auto* child = model.childMachine (state.index))
+            if (! prepareMachineLanes (host, *child, sclangPath))
+                return false;
+    }
+
+    return true;
+}
+
 juce::String machineAsSuperColliderEvent (const MachineModel& model)
 {
     juce::String text;
@@ -210,6 +226,21 @@ void appendRuntimeLog (const juce::String& message)
     runtimeDirectory().getChildFile ("app.log")
         .appendText (juce::Time::getCurrentTime().toString (true, true, true, true)
                      + "  " + message + "\n");
+}
+
+void killStaleBridgeProcesses()
+{
+    const auto bridgeScriptPath = runtimeDirectory().getChildFile ("sc-bridge")
+                                                    .getChildFile ("bridge.scd")
+                                                    .getFullPathName();
+    juce::StringArray args;
+    args.add ("/bin/sh");
+    args.add ("-c");
+    args.add ("/usr/bin/pkill -f " + shellQuote (bridgeScriptPath) + " >/dev/null 2>&1 || true");
+
+    juce::ChildProcess killer;
+    if (killer.start (args))
+        killer.waitForProcessToFinish (1500);
 }
 }
 
@@ -316,6 +347,42 @@ bool SuperColliderHost::freezeLane (Lane& lane, const juce::String& sclangPath, 
         sendFreezeCommand (lane.id, outputFile.getFullPathName(), durationSeconds);
         setStatus ("Freezing " + lane.name);
         addLog ("Freezing " + lane.name);
+        return true;
+    }
+
+bool SuperColliderHost::exportMachine (MachineModel& model,
+                                       const juce::String& sclangPath,
+                                       const juce::File& outputFile,
+                                       double durationSeconds,
+                                       double rate,
+                                       int startState,
+                                       const juce::String& sampleFormat)
+    {
+        appendRuntimeLog ("export requested -> " + outputFile.getFullPathName());
+        outputFile.getParentDirectory().createDirectory();
+
+        if (! prepareMachineLanes (*this, model, sclangPath))
+        {
+            appendRuntimeLog ("export prepare failed");
+            return false;
+        }
+
+        appendRuntimeLog ("export lanes prepared");
+
+        configureMachine (model);
+        appendRuntimeLog ("export machine configured");
+
+        const juce::ScopedLock lock (hostLock);
+        if (! ensureBridgeRunningLocked (sclangPath))
+        {
+            appendRuntimeLog ("export bridge unavailable");
+            return false;
+        }
+
+        sendExportCommand (outputFile.getFullPathName(), durationSeconds, rate, startState, sampleFormat);
+        appendRuntimeLog ("export command sent");
+        setStatus ("Exporting audio");
+        addLog ("Exporting audio to " + outputFile.getFullPathName());
         return true;
     }
 
@@ -522,6 +589,18 @@ void SuperColliderHost::stepMachine()
             writeCommand ("~markovStepMachine.();\n");
     }
 
+void SuperColliderHost::cancelExport()
+    {
+        const juce::ScopedLock lock (hostLock);
+
+        if (bridgeProcess != nullptr && bridgeProcess->isRunning())
+        {
+            sendCancelExportCommand();
+            addLog ("Cancelling audio export");
+            setStatus ("Cancelling export");
+        }
+    }
+
 void SuperColliderHost::testTone(const juce::String& sclangPath)
     {
         const juce::ScopedLock lock (hostLock);
@@ -563,6 +642,7 @@ bool SuperColliderHost::ensureBridgeRunningLocked(const juce::String& sclangPath
         setStatus ("Booting audio");
         addLog ("Starting SuperCollider bridge: " + executable);
         appendRuntimeLog ("starting bridge: " + executable);
+        killStaleBridgeProcesses();
 
         currentExecutable = executable;
         bridgeDirectory = runtimeDirectory().getChildFile ("sc-bridge");
@@ -671,6 +751,8 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "~markovMeterIds = IdentityDictionary.new;\n"
                "~markovMeterKeys = IdentityDictionary.new;\n"
                "~markovNextMeterId = 1;\n"
+               "~markovExportCancel = false;\n"
+               "~markovExporting = false;\n"
                "~markovJuce = NetAddr(\"127.0.0.1\", 57142);\n"
                "~markovLoad = { |key, path|\n"
                "    var file, source;\n"
@@ -911,6 +993,65 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "        }).play(SystemClock);\n"
                "    });\n"
                "};\n"
+               "~markovExport = { |path, duration = 32, rate = 1, startState = 0, sampleFormat = \"int16\"|\n"
+               "    ~markovWhenReady.({\n"
+               "        Routine({\n"
+               "            var recBuf, recSynth, elapsed;\n"
+               "            if (~markovConfiguredMachine.isNil) {\n"
+               "                \"MARKOV_EXPORT_ERROR no configured machine\".warn;\n"
+               "                ~markovJuce.sendMsg('/markov/exported', path, 0);\n"
+               "                ^nil;\n"
+               "            };\n"
+               "            if (~markovExporting) {\n"
+               "                \"MARKOV_EXPORT_ERROR already exporting\".warn;\n"
+               "                ~markovJuce.sendMsg('/markov/exported', path, 0);\n"
+               "                ^nil;\n"
+               "            };\n"
+               "            duration = duration.clip(1, 1800);\n"
+               "            rate = rate.max(0.05);\n"
+               "            sampleFormat = if ([\"int16\", \"int24\", \"float\"].includes(sampleFormat).not, { \"int16\" }, { sampleFormat });\n"
+               "            ~markovExportCancel = false;\n"
+               "            ~markovExporting = true;\n"
+               "            (\"MARKOV_EXPORT_START \" ++ path ++ \" duration=\" ++ duration ++ \" format=\" ++ sampleFormat).postln;\n"
+               "            ~markovPauseMachine.();\n"
+               "            recBuf = Buffer.alloc(s, 65536, 2);\n"
+               "            s.sync;\n"
+               "            recBuf.write(path, \"wav\", sampleFormat, 0, 0, true);\n"
+               "            s.sync;\n"
+               "            recSynth = { |buf| DiskOut.ar(buf, In.ar(0, 2)); Silent.ar(2) }.play(s, addAction: \\addToTail, args: [\\buf, recBuf]);\n"
+               "            s.sync;\n"
+               "            ~markovRunMachine.(startState.asInteger, rate);\n"
+               "            elapsed = 0.0;\n"
+               "            while { (elapsed < duration) and: { ~markovExportCancel.not } } {\n"
+               "                ~markovJuce.sendMsg('/markov/exportProgress', path, elapsed.min(duration), duration);\n"
+               "                0.25.wait;\n"
+               "                elapsed = elapsed + 0.25;\n"
+               "            };\n"
+               "            if (~markovExportCancel.not) { ~markovJuce.sendMsg('/markov/exportProgress', path, duration, duration); };\n"
+               "            ~markovPauseMachine.();\n"
+               "            ~markovStopAll.();\n"
+               "            s.sync;\n"
+               "            if (recSynth.notNil) { recSynth.free };\n"
+               "            s.sync;\n"
+               "            if (~markovExportCancel) {\n"
+               "                recBuf.close;\n"
+               "                s.sync;\n"
+               "                recBuf.free;\n"
+               "                ~markovExporting = false;\n"
+               "                ~markovJuce.sendMsg('/markov/exported', path, -1);\n"
+               "                (\"MARKOV_EXPORT_CANCELLED \" ++ path).postln;\n"
+               "                ^nil;\n"
+               "            };\n"
+               "            recBuf.close;\n"
+               "            s.sync;\n"
+               "            recBuf.free;\n"
+               "            ~markovExporting = false;\n"
+               "            ~markovJuce.sendMsg('/markov/exported', path, 1);\n"
+               "            (\"MARKOV_EXPORT_DONE \" ++ path).postln;\n"
+               "        }).play(SystemClock);\n"
+               "    });\n"
+               "};\n"
+               "~markovCancelExport = { ~markovExportCancel = true; };\n"
                "~markovTransition = { |stopKeys, playKeys, release, delay = 0|\n"
                "    ~markovWhenReady.({\n"
                "        var requestedAt = Main.elapsedTime;\n"
@@ -1089,6 +1230,8 @@ juce::String SuperColliderHost::makeBridgeScript() const
                "OSCdef(\\markovCheck, { |msg| ~markovCheck.(msg[1].asString, msg[2].asString, msg[3].asString); }, '/markov/check');\n"
                "OSCdef(\\markovPlay, { |msg| ~markovPlay.(msg[1].asString.asSymbol); }, '/markov/play');\n"
                "OSCdef(\\markovFreeze, { |msg| ~markovFreeze.(msg[1].asString.asSymbol, msg[2].asString, msg[3].asFloat); }, '/markov/freeze');\n"
+               "OSCdef(\\markovExport, { |msg| ~markovExport.(msg[1].asString, msg[2].asFloat, msg[3].asFloat, msg[4].asInteger, msg[5].asString); }, '/markov/export');\n"
+               "OSCdef(\\markovCancelExport, { ~markovCancelExport.(); }, '/markov/cancelExport');\n"
                "OSCdef(\\markovRunMachine, { |msg| ~markovRunMachine.(msg[1].asInteger, msg[2].asFloat); }, '/markov/runMachine');\n"
                "OSCdef(\\markovPauseMachine, { ~markovPauseMachine.(); }, '/markov/pauseMachine');\n"
                "OSCdef(\\markovTransition, { |msg|\n"
@@ -1155,6 +1298,33 @@ void SuperColliderHost::sendFreezeCommand (const juce::String& laneId, const juc
 
         if (oscConnected)
             oscSender.send ("/markov/freeze", laneId, audioPath, static_cast<float> (duration));
+    }
+
+void SuperColliderHost::sendExportCommand (const juce::String& audioPath, double durationSeconds, double rate, int startState, const juce::String& sampleFormat)
+    {
+        const auto duration = juce::jlimit (1.0, 1800.0, durationSeconds);
+        const auto clippedRate = juce::jmax (0.05, rate);
+        const auto clippedState = juce::jmax (0, startState);
+        const auto format = (sampleFormat == "int24" || sampleFormat == "float") ? sampleFormat : juce::String ("int16");
+
+        if (shouldUseCommandFallback())
+            writeCommand ("~markovExport.(" + scStringLiteral (audioPath) + ", "
+                          + scFloatLiteral (duration) + ", "
+                          + scFloatLiteral (clippedRate) + ", "
+                          + juce::String (clippedState) + ", "
+                          + scStringLiteral (format) + ");\n");
+
+        if (oscConnected)
+            oscSender.send ("/markov/export", audioPath, static_cast<float> (duration), static_cast<float> (clippedRate), clippedState, format);
+    }
+
+void SuperColliderHost::sendCancelExportCommand()
+    {
+        if (shouldUseCommandFallback())
+            writeCommand ("~markovCancelExport.();\n");
+
+        if (oscConnected)
+            oscSender.send ("/markov/cancelExport");
     }
 
 void SuperColliderHost::sendPlayCommand(const juce::String& laneId)

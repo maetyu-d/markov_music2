@@ -1461,6 +1461,251 @@ private:
     int selectedIndex = 0;
 };
 
+class ArrangementStripComponent final : public juce::Component
+{
+public:
+    std::function<void (int)> onStateSelected;
+
+    void setMachine (MachineModel& rootMachine, double playbackRate, bool exporting, double exportElapsed, double exportTotal)
+    {
+        machine = &rootMachine;
+        rate = juce::jmax (0.05, playbackRate);
+        exportInProgress = exporting;
+        exportElapsedSeconds = exportElapsed;
+        exportTotalSeconds = exportTotal;
+        repaint();
+    }
+
+    void mouseDown (const juce::MouseEvent& event) override
+    {
+        if (const auto index = stateIndexAt (event.position); index >= 0 && onStateSelected)
+            onStateSelected (index);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto bounds = getLocalBounds().toFloat();
+        g.setColour (juce::Colour (0xff101319).withAlpha (0.88f));
+        g.fillRoundedRectangle (bounds, 6.0f);
+        g.setColour (hairline().withAlpha (0.34f));
+        g.drawRoundedRectangle (bounds.reduced (0.5f), 6.0f, 0.8f);
+
+        if (machine == nullptr || machine->states.empty())
+            return;
+
+        auto titleArea = getLocalBounds().reduced (10, 5).removeFromTop (20);
+        const auto total = totalSeconds();
+        g.setFont (juce::FontOptions (11.5f, juce::Font::bold));
+        g.setColour (ink().withAlpha (0.92f));
+        g.drawFittedText ("Arrangement", titleArea.removeFromLeft (104), juce::Justification::centredLeft, 1);
+        g.setColour (mutedInk().withAlpha (0.70f));
+        g.setFont (juce::FontOptions (10.5f));
+        g.drawFittedText (juce::String (machine->getStateCount()) + " sections  "
+                            + juce::String (total, 1) + "s cycle  x" + juce::String (rate, 2),
+                          titleArea, juce::Justification::centredLeft, 1);
+
+        auto timeline = timelineArea();
+        g.setColour (juce::Colour (0xff0c0f14).withAlpha (0.58f));
+        g.fillRoundedRectangle (timeline, 4.0f);
+
+        if (total <= 0.0)
+            return;
+
+        drawRuler (g, timeline, total);
+        drawSections (g, timeline, total);
+        drawExportProgress (g, timeline, total);
+    }
+
+private:
+    double stateDurationSeconds (const State& state) const
+    {
+        return juce::jmax (0.1, state.secondsPerBar() / rate);
+    }
+
+    double totalSeconds() const
+    {
+        auto total = 0.0;
+        for (const auto& state : machine->states)
+            total += stateDurationSeconds (state);
+        return total;
+    }
+
+    juce::Rectangle<float> timelineArea() const
+    {
+        return getLocalBounds().toFloat().reduced (10.0f, 5.0f).withTrimmedTop (24.0f).reduced (0.0f, 2.0f);
+    }
+
+    void drawSections (juce::Graphics& g, juce::Rectangle<float> area, double total)
+    {
+        auto x = area.getX();
+        for (int i = 0; i < machine->getStateCount(); ++i)
+        {
+            const auto& state = machine->state (i);
+            const auto seconds = stateDurationSeconds (state);
+            const auto proportion = static_cast<float> (seconds / total);
+            const auto width = i == machine->getStateCount() - 1 ? area.getRight() - x
+                                                                 : juce::jmax (54.0f, area.getWidth() * proportion);
+            auto segment = juce::Rectangle<float> (x, area.getY(), juce::jmin (width - 3.0f, area.getRight() - x), area.getHeight());
+            const auto colour = graphColour (i);
+            const auto selected = i == machine->selectedState;
+
+            if (segment.getWidth() > 4.0f)
+            {
+                const auto fill = rowFill().interpolatedWith (colour, selected ? 0.22f : 0.09f);
+                g.setColour (fill.withAlpha (selected ? 0.98f : 0.86f));
+                g.fillRoundedRectangle (segment, 4.0f);
+
+                g.setColour (colour.withAlpha (selected ? 0.95f : 0.58f));
+                g.fillRoundedRectangle (segment.withHeight (3.0f), 2.0f);
+                g.setColour (selected ? colour.brighter (0.12f).withAlpha (0.98f) : hairline().withAlpha (0.44f));
+                g.drawRoundedRectangle (segment, 4.0f, selected ? 1.6f : 0.7f);
+
+                if (selected)
+                {
+                    g.setColour (colour.withAlpha (0.08f));
+                    g.fillRoundedRectangle (segment.expanded (4.0f, 5.0f), 8.0f);
+                }
+
+                drawSectionText (g, segment, state, i, seconds, colour, selected);
+            }
+
+            x += width;
+            if (x >= area.getRight() - 1.0f)
+                break;
+        }
+    }
+
+    void drawSectionText (juce::Graphics& g,
+                          juce::Rectangle<float> segment,
+                          const State& state,
+                          int stateIndex,
+                          double seconds,
+                          juce::Colour colour,
+                          bool selected)
+    {
+        auto textArea = segment.toNearestInt().reduced (8, 5);
+        if (segment.getWidth() < 68.0f)
+        {
+            g.setColour (colour.withAlpha (selected ? 0.96f : 0.70f));
+            g.fillRoundedRectangle (segment.reduced (segment.getWidth() * 0.40f, 16.0f), 2.0f);
+            return;
+        }
+
+        g.setFont (juce::FontOptions (12.0f, selected ? juce::Font::bold : juce::Font::plain));
+        g.setColour (selected ? ink() : mutedInk().withAlpha (0.88f));
+        g.drawFittedText (state.name, textArea.removeFromTop (18), juce::Justification::centredLeft, 1);
+
+        const auto timing = juce::String (state.tempoBpm, 0) + " BPM  "
+                          + juce::String (state.beatsPerBar) + "/" + juce::String (state.beatUnit);
+        const auto detail = juce::String (seconds, 1) + "s";
+        g.setFont (juce::FontOptions (10.0f));
+        g.setColour (mutedInk().withAlpha (selected ? 0.80f : 0.62f));
+
+        if (segment.getWidth() > 128.0f)
+            g.drawFittedText (timing + "  " + detail, textArea.removeFromTop (14), juce::Justification::centredLeft, 1);
+        else
+            g.drawFittedText (detail, textArea.removeFromTop (14), juce::Justification::centredLeft, 1);
+
+        const auto holdWeight = selfWeightFor (stateIndex);
+        if (segment.getWidth() > 118.0f && holdWeight > 0.0f)
+        {
+            auto chip = segment.toNearestInt().reduced (7, 6).removeFromBottom (15);
+            chip = chip.withWidth (juce::jlimit (34, 66, chip.getWidth()));
+            g.setColour (juce::Colour (0xff0d1015).withAlpha (0.82f));
+            g.fillRoundedRectangle (chip.toFloat(), 3.0f);
+            g.setColour (colour.withAlpha (0.42f));
+            g.drawRoundedRectangle (chip.toFloat(), 3.0f, 0.7f);
+            g.setColour (mutedInk().withAlpha (0.72f));
+            g.setFont (juce::FontOptions (8.8f, juce::Font::bold));
+            g.drawFittedText ("hold " + juce::String (holdWeight, 1), chip.reduced (4, 0), juce::Justification::centred, 1);
+        }
+    }
+
+    void drawRuler (juce::Graphics& g, juce::Rectangle<float> area, double total)
+    {
+        const auto baselineY = area.getBottom() - 7.0f;
+        g.setColour (hairline().withAlpha (0.30f));
+        g.drawHorizontalLine (juce::roundToInt (baselineY), area.getX(), area.getRight());
+
+        const auto tickStep = total > 90.0 ? 30.0 : (total > 45.0 ? 15.0 : 5.0);
+        for (double tick = 0.0; tick <= total + 0.001; tick += tickStep)
+        {
+            const auto x = area.getX() + static_cast<float> (tick / total) * area.getWidth();
+            g.setColour (hairline().withAlpha (tick == 0.0 ? 0.42f : 0.28f));
+            g.drawVerticalLine (juce::roundToInt (x), baselineY - 5.0f, baselineY + 5.0f);
+
+            if (tick > 0.0 && area.getWidth() > 520.0f)
+            {
+                g.setFont (juce::FontOptions (8.5f));
+                g.setColour (mutedInk().withAlpha (0.42f));
+                g.drawFittedText (juce::String (tick, 0) + "s",
+                                  juce::Rectangle<int> (juce::roundToInt (x + 3.0f), juce::roundToInt (baselineY - 17.0f), 34, 12),
+                                  juce::Justification::centredLeft, 1);
+            }
+        }
+    }
+
+    void drawExportProgress (juce::Graphics& g, juce::Rectangle<float> area, double total)
+    {
+        if (! exportInProgress || exportTotalSeconds <= 0.0)
+            return;
+
+        const auto progress = juce::jlimit (0.0f, 1.0f, static_cast<float> (exportElapsedSeconds / exportTotalSeconds));
+        auto progressArea = area.withHeight (4.0f).withY (area.getBottom() - 4.0f);
+        g.setColour (juce::Colour (0xff111318).withAlpha (0.88f));
+        g.fillRoundedRectangle (progressArea, 2.0f);
+        g.setColour (accentA().withAlpha (0.92f));
+        g.fillRoundedRectangle (progressArea.withWidth (progressArea.getWidth() * progress), 2.0f);
+        juce::ignoreUnused (total);
+    }
+
+    float selfWeightFor (int stateIndex) const
+    {
+        if (machine == nullptr)
+            return 0.0f;
+
+        for (const auto& rule : machine->rules)
+            if (rule.from == stateIndex && rule.to == stateIndex)
+                return rule.weight;
+
+        return 0.0f;
+    }
+
+    int stateIndexAt (juce::Point<float> point) const
+    {
+        if (machine == nullptr || machine->states.empty())
+            return -1;
+
+        auto area = timelineArea();
+        if (! area.contains (point))
+            return -1;
+
+        auto total = totalSeconds();
+
+        auto x = area.getX();
+        for (int i = 0; i < machine->getStateCount(); ++i)
+        {
+            const auto proportion = static_cast<float> (stateDurationSeconds (machine->state (i)) / total);
+            const auto width = i == machine->getStateCount() - 1 ? area.getRight() - x
+                                                                 : juce::jmax (54.0f, area.getWidth() * proportion);
+            const auto right = juce::jmin (x + width, area.getRight());
+            if (point.x >= x && point.x <= right)
+                return i;
+            x += width;
+            if (x >= area.getRight() - 1.0f)
+                break;
+        }
+
+        return -1;
+    }
+
+    MachineModel* machine = nullptr;
+    double rate = 1.0;
+    bool exportInProgress = false;
+    double exportElapsedSeconds = 0.0;
+    double exportTotalSeconds = 0.0;
+};
+
 class FsmNavigatorComponent final : public juce::Component
 {
 public:
@@ -2650,6 +2895,29 @@ private:
     }
 };
 
+struct AudioExportSettings
+{
+    juce::String range = "cycle";
+    int cycles = 1;
+    double customSeconds = 30.0;
+    double tailSeconds = 2.0;
+    juce::String sampleFormat = "int16";
+
+    bool operator== (const AudioExportSettings& other) const
+    {
+        return range == other.range
+            && cycles == other.cycles
+            && std::abs (customSeconds - other.customSeconds) < 0.001
+            && std::abs (tailSeconds - other.tailSeconds) < 0.001
+            && sampleFormat == other.sampleFormat;
+    }
+
+    bool operator!= (const AudioExportSettings& other) const
+    {
+        return ! (*this == other);
+    }
+};
+
 class AudioSettingsComponent final : public juce::Component
 {
 public:
@@ -2745,6 +3013,55 @@ public:
         scNote.setColour (juce::Label::textColourId, mutedInk());
         scNote.setJustificationType (juce::Justification::centredLeft);
 
+        exportSectionTitle.setText ("Audio export", juce::dontSendNotification);
+        exportSectionTitle.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+        exportSectionTitle.setColour (juce::Label::textColourId, mutedInk());
+        exportRangeLabel.setText ("Range", juce::dontSendNotification);
+        exportCyclesLabel.setText ("Cycles", juce::dontSendNotification);
+        exportCustomLabel.setText ("Seconds", juce::dontSendNotification);
+        exportTailLabel.setText ("Tail", juce::dontSendNotification);
+        exportFormatLabel.setText ("Format", juce::dontSendNotification);
+        for (auto* label : { &exportRangeLabel, &exportCyclesLabel, &exportCustomLabel, &exportTailLabel, &exportFormatLabel })
+        {
+            label->setFont (juce::FontOptions (12.0f, juce::Font::bold));
+            label->setColour (juce::Label::textColourId, mutedInk());
+            label->setJustificationType (juce::Justification::centredLeft);
+        }
+
+        exportRangeBox.addItem ("Project cycle", 1);
+        exportRangeBox.addItem ("Selected state", 2);
+        exportRangeBox.addItem ("Custom length", 3);
+        exportRangeBox.setColour (juce::ComboBox::backgroundColourId, juce::Colour (0xff111318));
+        exportRangeBox.setColour (juce::ComboBox::textColourId, ink());
+        exportRangeBox.setColour (juce::ComboBox::outlineColourId, hairline());
+        exportRangeBox.setSelectedItemIndex (rangeIndexFor (exportSettings.range), juce::dontSendNotification);
+        exportRangeBox.onChange = [this] { commitExportSettings(); };
+
+        configureSettingsEditor (exportCyclesEditor);
+        configureSettingsEditor (exportCustomEditor);
+        configureSettingsEditor (exportTailEditor);
+        exportCyclesEditor.setInputRestrictions (2, "0123456789");
+        exportCustomEditor.setInputRestrictions (6, "0123456789.");
+        exportTailEditor.setInputRestrictions (5, "0123456789.");
+        exportCyclesEditor.setText (juce::String (exportSettings.cycles), false);
+        exportCustomEditor.setText (juce::String (exportSettings.customSeconds, 1), false);
+        exportTailEditor.setText (juce::String (exportSettings.tailSeconds, 1), false);
+        exportCyclesEditor.onReturnKey = [this] { commitExportSettings(); };
+        exportCyclesEditor.onFocusLost = [this] { commitExportSettings(); };
+        exportCustomEditor.onReturnKey = [this] { commitExportSettings(); };
+        exportCustomEditor.onFocusLost = [this] { commitExportSettings(); };
+        exportTailEditor.onReturnKey = [this] { commitExportSettings(); };
+        exportTailEditor.onFocusLost = [this] { commitExportSettings(); };
+
+        exportFormatBox.addItem ("16-bit WAV", 1);
+        exportFormatBox.addItem ("24-bit WAV", 2);
+        exportFormatBox.addItem ("32-bit float WAV", 3);
+        exportFormatBox.setColour (juce::ComboBox::backgroundColourId, juce::Colour (0xff111318));
+        exportFormatBox.setColour (juce::ComboBox::textColourId, ink());
+        exportFormatBox.setColour (juce::ComboBox::outlineColourId, hairline());
+        exportFormatBox.setSelectedItemIndex (formatIndexFor (exportSettings.sampleFormat), juce::dontSendNotification);
+        exportFormatBox.onChange = [this] { commitExportSettings(); };
+
         audioSectionTitle.setFont (juce::FontOptions (12.0f, juce::Font::bold));
         audioSectionTitle.setColour (juce::Label::textColourId, mutedInk());
 
@@ -2787,7 +3104,7 @@ public:
         scChannelsLabel.setBounds (numericRow.removeFromLeft (34).reduced (0, 4));
         scChannelsEditor.setBounds (numericRow.removeFromLeft (42).reduced (0, 3));
         scNote.setBounds (area.removeFromTop (40));
-        area.removeFromTop (10);
+        area.removeFromTop (14);
         audioSectionTitle.setBounds (area.removeFromTop (22));
         note.setBounds (area.removeFromTop (54));
         area.removeFromTop (8);
@@ -2795,6 +3112,34 @@ public:
     }
 
 private:
+    static int rangeIndexFor (const juce::String& range)
+    {
+        if (range == "state") return 1;
+        if (range == "custom") return 2;
+        return 0;
+    }
+
+    static juce::String rangeForIndex (int index)
+    {
+        if (index == 1) return "state";
+        if (index == 2) return "custom";
+        return "cycle";
+    }
+
+    static int formatIndexFor (const juce::String& format)
+    {
+        if (format == "int24") return 1;
+        if (format == "float") return 2;
+        return 0;
+    }
+
+    static juce::String formatForIndex (int index)
+    {
+        if (index == 1) return "int24";
+        if (index == 2) return "float";
+        return "int16";
+    }
+
     static void configureSettingsEditor (juce::TextEditor& editor)
     {
         editor.setMultiLine (false);
@@ -2828,9 +3173,34 @@ private:
             onScAudioSettingsChanged (scAudioSettings);
     }
 
+    void commitExportSettings()
+    {
+        AudioExportSettings updated;
+        updated.range = rangeForIndex (exportRangeBox.getSelectedItemIndex());
+        updated.cycles = juce::jlimit (1, 16, exportCyclesEditor.getText().getIntValue() <= 0 ? 1 : exportCyclesEditor.getText().getIntValue());
+        updated.customSeconds = juce::jlimit (1.0, 1800.0, exportCustomEditor.getText().getDoubleValue() <= 0.0 ? 30.0 : exportCustomEditor.getText().getDoubleValue());
+        updated.tailSeconds = juce::jlimit (0.0, 60.0, exportTailEditor.getText().getDoubleValue());
+        updated.sampleFormat = formatForIndex (exportFormatBox.getSelectedItemIndex());
+
+        exportRangeBox.setSelectedItemIndex (rangeIndexFor (updated.range), juce::dontSendNotification);
+        exportCyclesEditor.setText (juce::String (updated.cycles), false);
+        exportCustomEditor.setText (juce::String (updated.customSeconds, 1), false);
+        exportTailEditor.setText (juce::String (updated.tailSeconds, 1), false);
+        exportFormatBox.setSelectedItemIndex (formatIndexFor (updated.sampleFormat), juce::dontSendNotification);
+
+        if (updated == exportSettings)
+            return;
+
+        exportSettings = updated;
+        if (onExportSettingsChanged)
+            onExportSettingsChanged (exportSettings);
+    }
+
     std::function<void (bool)> onColourblindSafeChanged;
     std::function<void (SuperColliderAudioSettings)> onScAudioSettingsChanged;
     SuperColliderAudioSettings scAudioSettings;
+    std::function<void (AudioExportSettings)> onExportSettingsChanged;
+    AudioExportSettings exportSettings;
     juce::Label title;
     juce::Label colourSectionTitle;
     juce::ToggleButton colourblindSafeToggle;
@@ -2844,6 +3214,17 @@ private:
     juce::Label scChannelsLabel;
     juce::TextEditor scChannelsEditor;
     juce::Label scNote;
+    juce::Label exportSectionTitle;
+    juce::Label exportRangeLabel;
+    juce::ComboBox exportRangeBox;
+    juce::Label exportCyclesLabel;
+    juce::TextEditor exportCyclesEditor;
+    juce::Label exportCustomLabel;
+    juce::TextEditor exportCustomEditor;
+    juce::Label exportTailLabel;
+    juce::TextEditor exportTailEditor;
+    juce::Label exportFormatLabel;
+    juce::ComboBox exportFormatBox;
     juce::Label audioSectionTitle;
     juce::Label note;
     juce::AudioDeviceSelectorComponent selector;
@@ -2867,6 +3248,292 @@ public:
                                                      std::move (scAudioSettingsChanged)), true);
         setResizable (false, false);
         centreWithSize (590, 680);
+    }
+
+    void closeButtonPressed() override
+    {
+        setVisible (false);
+    }
+};
+
+class AudioExportComponent final : public juce::Component
+{
+public:
+    AudioExportComponent (AudioExportSettings settingsToUse,
+                          juce::File defaultOutput,
+                          std::function<double (const AudioExportSettings&)> durationProvider,
+                          std::function<void (AudioExportSettings, juce::File)> exportRequested,
+                          std::function<void()> cancelRequested)
+        : settings (std::move (settingsToUse)),
+          outputFile (std::move (defaultOutput)),
+          getDurationSeconds (std::move (durationProvider)),
+          onExportRequested (std::move (exportRequested)),
+          onCancelRequested (std::move (cancelRequested))
+    {
+        addAndMakeVisible (title);
+        addAndMakeVisible (rangeLabel);
+        addAndMakeVisible (rangeBox);
+        addAndMakeVisible (cyclesLabel);
+        addAndMakeVisible (cyclesEditor);
+        addAndMakeVisible (customLabel);
+        addAndMakeVisible (customEditor);
+        addAndMakeVisible (tailLabel);
+        addAndMakeVisible (tailEditor);
+        addAndMakeVisible (formatLabel);
+        addAndMakeVisible (formatBox);
+        addAndMakeVisible (destinationLabel);
+        addAndMakeVisible (destinationEditor);
+        addAndMakeVisible (browseButton);
+        addAndMakeVisible (durationLabel);
+        addAndMakeVisible (exportButton);
+        addAndMakeVisible (cancelButton);
+
+        title.setText ("Audio Export", juce::dontSendNotification);
+        title.setFont (juce::FontOptions (21.0f, juce::Font::bold));
+        title.setColour (juce::Label::textColourId, ink());
+
+        for (auto* label : { &rangeLabel, &cyclesLabel, &customLabel, &tailLabel, &formatLabel, &destinationLabel })
+        {
+            label->setFont (juce::FontOptions (12.0f, juce::Font::bold));
+            label->setColour (juce::Label::textColourId, mutedInk());
+            label->setJustificationType (juce::Justification::centredLeft);
+        }
+
+        rangeLabel.setText ("Range", juce::dontSendNotification);
+        cyclesLabel.setText ("Cycles", juce::dontSendNotification);
+        customLabel.setText ("Seconds", juce::dontSendNotification);
+        tailLabel.setText ("Tail", juce::dontSendNotification);
+        formatLabel.setText ("Format", juce::dontSendNotification);
+        destinationLabel.setText ("Destination", juce::dontSendNotification);
+
+        configureEditor (cyclesEditor);
+        configureEditor (customEditor);
+        configureEditor (tailEditor);
+        configureEditor (destinationEditor);
+        cyclesEditor.setInputRestrictions (2, "0123456789");
+        customEditor.setInputRestrictions (6, "0123456789.");
+        tailEditor.setInputRestrictions (5, "0123456789.");
+        destinationEditor.setReadOnly (true);
+
+        rangeBox.addItem ("Project cycle", 1);
+        rangeBox.addItem ("Selected state", 2);
+        rangeBox.addItem ("Custom length", 3);
+        formatBox.addItem ("16-bit WAV", 1);
+        formatBox.addItem ("24-bit WAV", 2);
+        formatBox.addItem ("32-bit float WAV", 3);
+        for (auto* box : { &rangeBox, &formatBox })
+        {
+            box->setColour (juce::ComboBox::backgroundColourId, juce::Colour (0xff111318));
+            box->setColour (juce::ComboBox::textColourId, ink());
+            box->setColour (juce::ComboBox::outlineColourId, hairline());
+            box->onChange = [this] { commitFields(); };
+        }
+
+        browseButton.setButtonText ("Choose...");
+        exportButton.setButtonText ("Export");
+        cancelButton.setButtonText ("Cancel");
+        exportButton.setColour (juce::TextButton::buttonColourId, accentA().darker (0.25f));
+
+        browseButton.onClick = [this] { chooseDestination(); };
+        exportButton.onClick = [this]
+        {
+            commitFields();
+            if (outputFile == juce::File())
+                return;
+
+            if (onExportRequested)
+                onExportRequested (settings, outputFile);
+        };
+        cancelButton.onClick = [this]
+        {
+            if (onCancelRequested)
+                onCancelRequested();
+        };
+
+        cyclesEditor.onReturnKey = [this] { commitFields(); };
+        cyclesEditor.onFocusLost = [this] { commitFields(); };
+        customEditor.onReturnKey = [this] { commitFields(); };
+        customEditor.onFocusLost = [this] { commitFields(); };
+        tailEditor.onReturnKey = [this] { commitFields(); };
+        tailEditor.onFocusLost = [this] { commitFields(); };
+
+        refreshFields();
+        setSize (520, 282);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        juce::ColourGradient bg (backgroundTop(), 0.0f, 0.0f, backgroundBottom(), 0.0f, static_cast<float> (getHeight()), false);
+        g.setGradientFill (bg);
+        g.fillAll();
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds().reduced (18, 16);
+        title.setBounds (area.removeFromTop (32));
+        area.removeFromTop (10);
+        auto rangeRow = area.removeFromTop (34);
+        rangeLabel.setBounds (rangeRow.removeFromLeft (78).reduced (0, 5));
+        rangeBox.setBounds (rangeRow.removeFromLeft (168).reduced (0, 4));
+        rangeRow.removeFromLeft (14);
+        cyclesLabel.setBounds (rangeRow.removeFromLeft (50).reduced (0, 5));
+        cyclesEditor.setBounds (rangeRow.removeFromLeft (48).reduced (0, 4));
+        rangeRow.removeFromLeft (14);
+        customLabel.setBounds (rangeRow.removeFromLeft (62).reduced (0, 5));
+        customEditor.setBounds (rangeRow.removeFromLeft (64).reduced (0, 4));
+
+        auto formatRow = area.removeFromTop (34);
+        tailLabel.setBounds (formatRow.removeFromLeft (78).reduced (0, 5));
+        tailEditor.setBounds (formatRow.removeFromLeft (64).reduced (0, 4));
+        formatRow.removeFromLeft (16);
+        formatLabel.setBounds (formatRow.removeFromLeft (58).reduced (0, 5));
+        formatBox.setBounds (formatRow.removeFromLeft (164).reduced (0, 4));
+
+        auto destinationRow = area.removeFromTop (36);
+        destinationLabel.setBounds (destinationRow.removeFromLeft (78).reduced (0, 5));
+        browseButton.setBounds (destinationRow.removeFromRight (92).reduced (3, 4));
+        destinationEditor.setBounds (destinationRow.reduced (0, 4));
+        durationLabel.setBounds (area.removeFromTop (28));
+
+        auto buttonRow = area.removeFromBottom (42);
+        cancelButton.setBounds (buttonRow.removeFromRight (92).reduced (4, 5));
+        exportButton.setBounds (buttonRow.removeFromRight (104).reduced (4, 5));
+    }
+
+private:
+    static int rangeIndexFor (const juce::String& range)
+    {
+        if (range == "state") return 1;
+        if (range == "custom") return 2;
+        return 0;
+    }
+
+    static juce::String rangeForIndex (int index)
+    {
+        if (index == 1) return "state";
+        if (index == 2) return "custom";
+        return "cycle";
+    }
+
+    static int formatIndexFor (const juce::String& format)
+    {
+        if (format == "int24") return 1;
+        if (format == "float") return 2;
+        return 0;
+    }
+
+    static juce::String formatForIndex (int index)
+    {
+        if (index == 1) return "int24";
+        if (index == 2) return "float";
+        return "int16";
+    }
+
+    static void configureEditor (juce::TextEditor& editor)
+    {
+        editor.setMultiLine (false);
+        editor.setFont (juce::FontOptions (12.5f));
+        editor.setColour (juce::TextEditor::backgroundColourId, juce::Colour (0xff111318));
+        editor.setColour (juce::TextEditor::textColourId, ink());
+        editor.setColour (juce::TextEditor::outlineColourId, hairline());
+        editor.setColour (juce::TextEditor::focusedOutlineColourId, accentA());
+    }
+
+    void refreshFields()
+    {
+        rangeBox.setSelectedItemIndex (rangeIndexFor (settings.range), juce::dontSendNotification);
+        cyclesEditor.setText (juce::String (settings.cycles), false);
+        customEditor.setText (juce::String (settings.customSeconds, 1), false);
+        tailEditor.setText (juce::String (settings.tailSeconds, 1), false);
+        formatBox.setSelectedItemIndex (formatIndexFor (settings.sampleFormat), juce::dontSendNotification);
+        destinationEditor.setText (outputFile.getFullPathName(), false);
+        refreshDuration();
+    }
+
+    void refreshDuration()
+    {
+        const auto seconds = getDurationSeconds ? getDurationSeconds (settings) : 0.0;
+        durationLabel.setText ("Estimated length: " + juce::String (seconds, 1) + "s", juce::dontSendNotification);
+        durationLabel.setFont (juce::FontOptions (12.5f, juce::Font::bold));
+        durationLabel.setColour (juce::Label::textColourId, mutedInk());
+    }
+
+    void commitFields()
+    {
+        settings.range = rangeForIndex (rangeBox.getSelectedItemIndex());
+        settings.cycles = juce::jlimit (1, 16, cyclesEditor.getText().getIntValue() <= 0 ? 1 : cyclesEditor.getText().getIntValue());
+        settings.customSeconds = juce::jlimit (1.0, 1800.0, customEditor.getText().getDoubleValue() <= 0.0 ? 30.0 : customEditor.getText().getDoubleValue());
+        settings.tailSeconds = juce::jlimit (0.0, 60.0, tailEditor.getText().getDoubleValue());
+        settings.sampleFormat = formatForIndex (formatBox.getSelectedItemIndex());
+        refreshFields();
+    }
+
+    void chooseDestination()
+    {
+        chooser = std::make_unique<juce::FileChooser> ("Export Markov FSM Audio", outputFile, "*.wav");
+        chooser->launchAsync (juce::FileBrowserComponent::saveMode
+                                  | juce::FileBrowserComponent::canSelectFiles
+                                  | juce::FileBrowserComponent::warnAboutOverwriting,
+                              [safeThis = juce::Component::SafePointer<AudioExportComponent> (this)] (const juce::FileChooser& fileChooser)
+                              {
+                                  if (safeThis == nullptr)
+                                      return;
+
+                                  auto file = fileChooser.getResult();
+                                  if (file == juce::File())
+                                      return;
+
+                                  if (file.getFileExtension().isEmpty())
+                                      file = file.withFileExtension (".wav");
+
+                                  safeThis->outputFile = file;
+                                  safeThis->refreshFields();
+                              });
+    }
+
+    AudioExportSettings settings;
+    juce::File outputFile;
+    std::function<double (const AudioExportSettings&)> getDurationSeconds;
+    std::function<void (AudioExportSettings, juce::File)> onExportRequested;
+    std::function<void()> onCancelRequested;
+    std::unique_ptr<juce::FileChooser> chooser;
+    juce::Label title;
+    juce::Label rangeLabel;
+    juce::ComboBox rangeBox;
+    juce::Label cyclesLabel;
+    juce::TextEditor cyclesEditor;
+    juce::Label customLabel;
+    juce::TextEditor customEditor;
+    juce::Label tailLabel;
+    juce::TextEditor tailEditor;
+    juce::Label formatLabel;
+    juce::ComboBox formatBox;
+    juce::Label destinationLabel;
+    juce::TextEditor destinationEditor;
+    juce::TextButton browseButton;
+    juce::Label durationLabel;
+    juce::TextButton exportButton;
+    juce::TextButton cancelButton;
+};
+
+class AudioExportWindow final : public juce::DocumentWindow
+{
+public:
+    AudioExportWindow (AudioExportSettings settings,
+                       juce::File defaultOutput,
+                       std::function<double (const AudioExportSettings&)> durationProvider,
+                       std::function<void (AudioExportSettings, juce::File)> exportRequested)
+        : DocumentWindow ("Audio Export", backgroundTop(), DocumentWindow::closeButton)
+    {
+        setUsingNativeTitleBar (true);
+        setContentOwned (new AudioExportComponent (std::move (settings),
+                                                   std::move (defaultOutput),
+                                                   std::move (durationProvider),
+                                                   std::move (exportRequested),
+                                                   [this] { setVisible (false); }), true);
+        setResizable (false, false);
+        centreWithSize (520, 282);
     }
 
     void closeButtonPressed() override
@@ -2906,12 +3573,14 @@ public:
         addAndMakeVisible (graph);
         addAndMakeVisible (graphFitButton);
         addAndMakeVisible (graphLayoutButton);
+        addAndMakeVisible (arrangementViewButton);
         addAndMakeVisible (rules);
         addAndMakeVisible (graphBottomDivider);
         addAndMakeVisible (rulesTracksDivider);
         addAndMakeVisible (tracksCodeDivider);
         addAndMakeVisible (rightInspectorDivider);
         addAndMakeVisible (stateTabs);
+        addAndMakeVisible (arrangementStrip);
         addAndMakeVisible (navigator);
         addAndMakeVisible (stateInfoTitle);
         addAndMakeVisible (nestedSectionTitle);
@@ -3178,6 +3847,8 @@ public:
             addListener (this, "/markov/meter");
             addListener (this, "/markov/pulse");
             addListener (this, "/markov/frozen");
+            addListener (this, "/markov/exported");
+            addListener (this, "/markov/exportProgress");
         }
         else
             appendLog ("Could not bind visual state OSC port 57142");
@@ -3212,8 +3883,16 @@ public:
 
         graphFitButton.setButtonText ("Fit");
         graphLayoutButton.setButtonText ("Layout");
+        arrangementViewButton.setButtonText ("Arrange");
         graphFitButton.onClick = [this] { graph.fitView(); };
         graphLayoutButton.onClick = [this] { graph.resetLayout(); };
+        arrangementViewButton.onClick = [this]
+        {
+            arrangementViewVisible = ! arrangementViewVisible;
+            saveAppState();
+            resized();
+            refreshControls();
+        };
 
         runButton.onClick = [this]
         {
@@ -3304,6 +3983,14 @@ public:
             currentMachine().selectedState = newIndex;
             currentMachine().selectedLane = 0;
             inspectedMachine = &currentMachine();
+            refreshControls();
+        };
+
+        arrangementStrip.onStateSelected = [this] (int newIndex)
+        {
+            machine.selectedState = juce::jlimit (0, machine.getStateCount() - 1, newIndex);
+            machine.selectedLane = 0;
+            inspectedMachine = &machine;
             refreshControls();
         };
 
@@ -3620,6 +4307,7 @@ public:
 
     ~MainComponent() override
     {
+        exportWindow = nullptr;
         settingsWindow = nullptr;
         autosaveIfNeeded (true);
         saveAppState();
@@ -3686,6 +4374,41 @@ public:
         chooseProjectToSave();
     }
 
+    void exportAudio()
+    {
+        exportWindow = std::make_unique<AudioExportWindow> (exportSettings,
+                                                            defaultAudioExportFile(),
+                                                            [safeThis = juce::Component::SafePointer<MainComponent> (this)] (const AudioExportSettings& settings)
+                                                            {
+                                                                return safeThis == nullptr ? 0.0 : safeThis->exportDurationSeconds (settings);
+                                                            },
+                                                            [safeThis = juce::Component::SafePointer<MainComponent> (this)] (AudioExportSettings settings, juce::File file)
+                                                            {
+                                                                if (safeThis == nullptr)
+                                                                    return;
+
+                                                                safeThis->setAudioExportSettings (std::move (settings));
+                                                                if (safeThis->exportWindow != nullptr)
+                                                                    safeThis->exportWindow->setVisible (false);
+                                                                safeThis->beginAudioExport (file);
+                                                            });
+        exportWindow->setVisible (true);
+        exportWindow->toFront (true);
+    }
+
+    void cancelAudioExport()
+    {
+        if (! exportInProgress)
+        {
+            statusLabel.setText ("No export running", juce::dontSendNotification);
+            return;
+        }
+
+        exportCancelRequested = true;
+        statusLabel.setText ("Cancelling export", juce::dontSendNotification);
+        host.cancelExport();
+    }
+
     void showSettings()
     {
         if (settingsWindow == nullptr)
@@ -3750,6 +4473,24 @@ public:
         refreshControls();
     }
 
+    void setAudioExportSettings (AudioExportSettings settings)
+    {
+        if (settings.range != "state" && settings.range != "custom")
+            settings.range = "cycle";
+        settings.cycles = juce::jlimit (1, 16, settings.cycles <= 0 ? 1 : settings.cycles);
+        settings.customSeconds = juce::jlimit (1.0, 1800.0, settings.customSeconds <= 0.0 ? 30.0 : settings.customSeconds);
+        settings.tailSeconds = juce::jlimit (0.0, 60.0, settings.tailSeconds);
+        if (settings.sampleFormat != "int24" && settings.sampleFormat != "float")
+            settings.sampleFormat = "int16";
+
+        if (exportSettings == settings)
+            return;
+
+        exportSettings = std::move (settings);
+        statusLabel.setText ("Export settings changed", juce::dontSendNotification);
+        saveAppState();
+    }
+
     void paint (juce::Graphics& g) override
     {
         juce::ColourGradient bg (backgroundTop(), getLocalBounds().getTopLeft().toFloat(),
@@ -3796,8 +4537,8 @@ public:
         auto area = getLocalBounds().reduced (18);
         auto header = area.removeFromTop (46);
         auto headerInner = header.reduced (10, 7);
-        title.setBounds (headerInner.removeFromLeft (226));
-        statusLabel.setBounds (headerInner.removeFromLeft (148).reduced (4, 2));
+        title.setBounds (headerInner.removeFromLeft (260));
+        statusLabel.setBounds (headerInner.removeFromLeft (150).reduced (4, 2));
 
         auto topCountArea = headerInner.removeFromRight (154);
         topStateCountLabel.setBounds (topCountArea.removeFromLeft (48).reduced (2, 2));
@@ -3806,26 +4547,36 @@ public:
         topStateCountPlus.setBounds (topCountArea.removeFromLeft (27).reduced (2, 0));
         headerInner.removeFromRight (8);
         rateSlider.setBounds (headerInner.removeFromRight (136).reduced (4, 0));
-        headerInner.removeFromRight (8);
-        graphLayoutButton.setBounds (headerInner.removeFromRight (62).reduced (3, 0));
-        graphFitButton.setBounds (headerInner.removeFromRight (42).reduced (3, 0));
-        logButton.setBounds (headerInner.removeFromRight (50).reduced (3, 0));
-        headerInner.removeFromRight (8);
-        redoButton.setBounds (headerInner.removeFromRight (54).reduced (3, 0));
-        undoButton.setBounds (headerInner.removeFromRight (56).reduced (3, 0));
-        headerInner.removeFromRight (8);
-        saveProjectButton.setBounds (headerInner.removeFromRight (56).reduced (3, 0));
-        loadProjectButton.setBounds (headerInner.removeFromRight (56).reduced (3, 0));
-        headerInner.removeFromRight (8);
-        panicButton.setBounds (headerInner.removeFromRight (68).reduced (3, 0));
-        stopAllButton.setBounds (headerInner.removeFromRight (80).reduced (3, 0));
-        stepButton.setBounds (headerInner.removeFromRight (60).reduced (3, 0));
-        runButton.setBounds (headerInner.removeFromRight (74).reduced (3, 0));
+
+        auto buttonRow = headerInner;
+        auto addButton = [&buttonRow] (juce::Button& button, int width)
+        {
+            button.setBounds (buttonRow.removeFromLeft (width).reduced (3, 0));
+        };
+        auto addGap = [&buttonRow] (int width) { buttonRow.removeFromLeft (width); };
+
+        addButton (runButton, 78);
+        addButton (stepButton, 62);
+        addButton (stopAllButton, 86);
+        addButton (panicButton, 74);
+        addGap (10);
+        addButton (loadProjectButton, 60);
+        addButton (saveProjectButton, 60);
+        addGap (8);
+        addButton (undoButton, 58);
+        addButton (redoButton, 58);
+        addGap (8);
+        addButton (logButton, 52);
+        addButton (arrangementViewButton, 76);
+        addButton (graphFitButton, 44);
+        addButton (graphLayoutButton, 66);
 
         const auto horizontalDividerHeight = 8;
+        const auto arrangementHeight = arrangementViewVisible ? 88 : 0;
+        const auto topWorkspaceHeight = 36 + arrangementHeight;
         const auto minGraphHeight = codeExpanded ? 112 : 230;
         const auto minBottomHeight = codeExpanded ? 320 : 170;
-        const auto maxBottomHeight = juce::jmax (minBottomHeight, area.getHeight() - 36 - minGraphHeight - horizontalDividerHeight);
+        const auto maxBottomHeight = juce::jmax (minBottomHeight, area.getHeight() - topWorkspaceHeight - minGraphHeight - horizontalDividerHeight);
         if (codeExpanded)
         {
             bottomPaneHeight = juce::jlimit (minBottomHeight, maxBottomHeight,
@@ -3977,7 +4728,12 @@ public:
         codeCheckLabel.setBounds (codeHeader.reduced (3));
         scriptEditor.setBounds (codePaneInner.reduced (0, 6));
 
-        stateTabs.setBounds (area.removeFromTop (36));
+        stateTabs.setBounds (workspace.removeFromTop (36));
+        if (arrangementViewVisible)
+            arrangementStrip.setBounds (workspace.removeFromTop (arrangementHeight).reduced (5, 6));
+        else
+            arrangementStrip.setBounds ({});
+
         auto graphArea = workspace.reduced (0, 10);
         if (logVisible)
             logView.setBounds (graphArea.removeFromBottom (142).reduced (0, 8));
@@ -4241,6 +4997,18 @@ private:
             return;
         }
 
+        if (address == "/markov/exported")
+        {
+            handleExportedMessage (message);
+            return;
+        }
+
+        if (address == "/markov/exportProgress")
+        {
+            handleExportProgressMessage (message);
+            return;
+        }
+
         if (address != "/markov/state")
             return;
 
@@ -4293,6 +5061,42 @@ private:
         markMachineDirty (UndoGroup::continuous);
         refreshProjectMediaStatus();
         refreshControls();
+    }
+
+    void handleExportedMessage (const juce::OSCMessage& message)
+    {
+        if (message.size() < 2 || ! message[0].isString())
+            return;
+
+        const auto outputPath = message[0].getString();
+        const auto status = message[1].isInt32() ? message[1].getInt32() : static_cast<int> (getOscFloat (message[1]));
+        const auto ok = status > 0;
+        const auto cancelled = status < 0;
+        audioJobRunning = false;
+        exportInProgress = false;
+        exportCancelRequested = false;
+        exportElapsedSeconds = 0.0;
+        exportTotalSeconds = 0.0;
+        statusLabel.setText (ok ? "Audio exported" : (cancelled ? "Audio export cancelled" : "Audio export failed"), juce::dontSendNotification);
+        appendLog ((ok ? "Audio export ready: " : (cancelled ? "Audio export cancelled: " : "Audio export failed: ")) + outputPath);
+        refreshControls();
+    }
+
+    void handleExportProgressMessage (const juce::OSCMessage& message)
+    {
+        if (message.size() < 3 || ! message[0].isString())
+            return;
+
+        if (! exportInProgress)
+            return;
+
+        exportElapsedSeconds = juce::jlimit (0.0, 1800.0, static_cast<double> (getOscFloat (message[1])));
+        exportTotalSeconds = juce::jlimit (1.0, 1800.0, static_cast<double> (getOscFloat (message[2])));
+        statusLabel.setText ("Exporting " + juce::String (exportElapsedSeconds, 1)
+                             + " / " + juce::String (exportTotalSeconds, 1) + "s",
+                             juce::dontSendNotification);
+        if (arrangementViewVisible)
+            arrangementStrip.setMachine (machine, rateSlider.getValue(), exportInProgress, exportElapsedSeconds, exportTotalSeconds);
     }
 
     void handleMeterMessage (const juce::OSCMessage& message)
@@ -4384,10 +5188,16 @@ private:
         object->setProperty ("lastProject", currentProjectFile.getFullPathName());
         object->setProperty ("lastAutosave", autosaveFile().getFullPathName());
         object->setProperty ("colourblindSafeMode", colourblindSafeMode);
+        object->setProperty ("arrangementViewVisible", arrangementViewVisible);
         object->setProperty ("scOutputDevice", scAudioSettings.outputDevice);
         object->setProperty ("scSampleRate", scAudioSettings.sampleRate);
         object->setProperty ("scHardwareBufferSize", scAudioSettings.hardwareBufferSize);
         object->setProperty ("scOutputChannels", scAudioSettings.outputChannels);
+        object->setProperty ("exportRange", exportSettings.range);
+        object->setProperty ("exportCycles", exportSettings.cycles);
+        object->setProperty ("exportCustomSeconds", exportSettings.customSeconds);
+        object->setProperty ("exportTailSeconds", exportSettings.tailSeconds);
+        object->setProperty ("exportSampleFormat", exportSettings.sampleFormat);
 
         juce::Array<juce::var> recent;
         for (const auto& path : recentProjects)
@@ -4415,6 +5225,7 @@ private:
 
         colourblindSafeMode = static_cast<bool> (parsed.getProperty ("colourblindSafeMode", false));
         setColourblindSafePalette (colourblindSafeMode);
+        arrangementViewVisible = static_cast<bool> (parsed.getProperty ("arrangementViewVisible", false));
         scAudioSettings.outputDevice = parsed.getProperty ("scOutputDevice", {}).toString().trim();
         scAudioSettings.sampleRate = static_cast<double> (parsed.getProperty ("scSampleRate", 0.0));
         scAudioSettings.hardwareBufferSize = static_cast<int> (parsed.getProperty ("scHardwareBufferSize", 64));
@@ -4423,6 +5234,15 @@ private:
         scAudioSettings.hardwareBufferSize = juce::jlimit (16, 4096, scAudioSettings.hardwareBufferSize <= 0 ? 64 : scAudioSettings.hardwareBufferSize);
         scAudioSettings.outputChannels = juce::jlimit (1, 64, scAudioSettings.outputChannels <= 0 ? 2 : scAudioSettings.outputChannels);
         host.setAudioSettings (scAudioSettings);
+        exportSettings.range = parsed.getProperty ("exportRange", "cycle").toString();
+        if (exportSettings.range != "state" && exportSettings.range != "custom")
+            exportSettings.range = "cycle";
+        exportSettings.cycles = juce::jlimit (1, 16, static_cast<int> (parsed.getProperty ("exportCycles", 1)));
+        exportSettings.customSeconds = juce::jlimit (1.0, 1800.0, static_cast<double> (parsed.getProperty ("exportCustomSeconds", 30.0)));
+        exportSettings.tailSeconds = juce::jlimit (0.0, 60.0, static_cast<double> (parsed.getProperty ("exportTailSeconds", 2.0)));
+        exportSettings.sampleFormat = parsed.getProperty ("exportSampleFormat", "int16").toString();
+        if (exportSettings.sampleFormat != "int24" && exportSettings.sampleFormat != "float")
+            exportSettings.sampleFormat = "int16";
     }
 
     void restoreLastProject()
@@ -5075,6 +5895,121 @@ private:
                                      });
     }
 
+    juce::File defaultAudioExportFile() const
+    {
+        auto base = currentProjectFile.existsAsFile()
+            ? currentProjectFile.getSiblingFile (currentProjectFile.getFileNameWithoutExtension() + " Export.wav")
+            : juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("Markov FSM Export.wav");
+
+        return base;
+    }
+
+    double exportDurationSeconds() const
+    {
+        return exportDurationSeconds (exportSettings);
+    }
+
+    double exportDurationSeconds (const AudioExportSettings& settings) const
+    {
+        const auto rate = juce::jmax (0.05, rateSlider.getValue());
+        auto musicalSeconds = 0.0;
+
+        if (settings.range == "custom")
+        {
+            musicalSeconds = settings.customSeconds;
+        }
+        else if (settings.range == "state")
+        {
+            musicalSeconds = machine.state (machine.selectedState).secondsPerBar() / rate;
+        }
+        else
+        {
+            for (const auto& state : machine.states)
+                musicalSeconds += state.secondsPerBar() / rate;
+
+            musicalSeconds *= static_cast<double> (settings.cycles);
+        }
+
+        return juce::jlimit (1.0, 1800.0, musicalSeconds + musicalReleaseSeconds + settings.tailSeconds);
+    }
+
+    void chooseAudioExportFile()
+    {
+        projectChooser = std::make_unique<juce::FileChooser> ("Export Markov FSM Audio", defaultAudioExportFile(), "*.wav");
+        auto safeThis = juce::Component::SafePointer<MainComponent> (this);
+        projectChooser->launchAsync (juce::FileBrowserComponent::saveMode
+                                         | juce::FileBrowserComponent::canSelectFiles
+                                         | juce::FileBrowserComponent::warnAboutOverwriting,
+                                     [safeThis] (const juce::FileChooser& chooser)
+                                     {
+                                         if (safeThis == nullptr)
+                                             return;
+
+                                         auto file = chooser.getResult();
+                                         if (file == juce::File())
+                                             return;
+
+                                         if (file.getFileExtension().isEmpty())
+                                             file = file.withFileExtension (".wav");
+
+                                         safeThis->beginAudioExport (file);
+                                     });
+    }
+
+    void beginAudioExport (const juce::File& outputFile)
+    {
+        if (audioJobRunning.exchange (true))
+        {
+            statusLabel.setText ("Audio busy", juce::dontSendNotification);
+            return;
+        }
+
+        fsmRunning = false;
+        stopTransport();
+        host.pauseMachine();
+        host.stopAll (machine);
+        runButton.setButtonText ("Run");
+
+        const auto duration = exportDurationSeconds();
+        const auto rate = rateSlider.getValue();
+        const auto startState = machine.selectedState;
+        const auto sampleFormat = exportSettings.sampleFormat;
+        const auto path = getSclangPathOverride();
+        exportInProgress = true;
+        exportCancelRequested = false;
+        exportElapsedSeconds = 0.0;
+        exportTotalSeconds = duration;
+        exportOutputPath = outputFile.getFullPathName();
+        statusLabel.setText ("Exporting WAV", juce::dontSendNotification);
+
+        auto safeThis = juce::Component::SafePointer<MainComponent> (this);
+        juce::Thread::launch ([safeThis, outputFile, duration, rate, startState, sampleFormat, path]
+        {
+            if (safeThis == nullptr)
+                return;
+
+            const auto ok = safeThis->host.exportMachine (safeThis->machine, path, outputFile, duration, rate, startState, sampleFormat);
+            juce::MessageManager::callAsync ([safeThis, ok, outputFile]
+            {
+                if (safeThis == nullptr)
+                    return;
+
+                if (! ok)
+                {
+                    safeThis->audioJobRunning = false;
+                    safeThis->exportInProgress = false;
+                    safeThis->exportCancelRequested = false;
+                    safeThis->statusLabel.setText ("Audio export failed", juce::dontSendNotification);
+                    safeThis->appendLog ("Audio export failed: " + outputFile.getFullPathName());
+                }
+                else
+                {
+                    safeThis->appendLog ("Audio export started: " + outputFile.getFullPathName());
+                }
+            });
+        });
+    }
+
     void autosaveIfNeeded (bool force)
     {
         if (! dirtyProject)
@@ -5532,7 +6467,7 @@ private:
         if (audioJobRunning.exchange (true))
             return;
 
-        runButton.setButtonText (startAfterPrepare ? "Starting..." : "Run");
+        runButton.setButtonText ("Run");
         statusLabel.setText ("Booting audio", juce::dontSendNotification);
 
         auto lanes = makeLaneSnapshots();
@@ -6303,11 +7238,23 @@ private:
             nestedDivisionEditor.setText ("-", false);
         }
         topStateCountEditor.setText (juce::String (machine.getStateCount()), false);
+        arrangementStrip.setVisible (arrangementViewVisible);
+        arrangementStrip.setMachine (machine, rateSlider.getValue(), exportInProgress, exportElapsedSeconds, exportTotalSeconds);
+        arrangementViewButton.setColour (juce::TextButton::buttonColourId,
+                                         arrangementViewVisible ? rowFill().interpolatedWith (graphColour (machine.selectedState + 2), 0.20f)
+                                                                : panelFill().brighter (0.04f));
+        arrangementViewButton.setColour (juce::TextButton::textColourOffId,
+                                         arrangementViewVisible ? graphColour (machine.selectedState + 2).brighter (0.12f)
+                                                                : mutedInk());
         const auto selectedLanePlaying = currentInspectorMachine().selectedLaneRef().playing;
         playButton.setButtonText (selectedLanePlaying ? "Stop" : "Play");
         playButton.setColour (juce::TextButton::buttonColourId,
                               selectedLanePlaying ? rowFill().interpolatedWith (graphColour (currentInspectorMachine().selectedLane, 4), 0.24f)
                                                   : rowFill().interpolatedWith (graphColour (currentInspectorMachine().selectedLane), 0.16f));
+        runButton.setEnabled (! exportInProgress);
+        stepButton.setEnabled (! exportInProgress);
+        playButton.setEnabled (! exportInProgress);
+        stopAllButton.setEnabled (! exportInProgress || exportCancelRequested);
         runButton.setColour (juce::TextButton::buttonColourId, fsmRunning ? rowFill().interpolatedWith (graphColour (machine.selectedState), 0.24f)
                                                                           : rowFill().interpolatedWith (graphColour (machine.selectedState), 0.10f));
         stepButton.setColour (juce::TextButton::buttonColourId, rowFill().interpolatedWith (graphColour (machine.selectedState + 1), 0.10f));
@@ -6362,6 +7309,7 @@ private:
     GraphComponent graph;
     juce::TextButton graphFitButton;
     juce::TextButton graphLayoutButton;
+    juce::TextButton arrangementViewButton;
     RuleListComponent rules;
     PaneDivider graphBottomDivider { PaneDivider::Orientation::horizontal };
     PaneDivider rulesTracksDivider;
@@ -6385,6 +7333,7 @@ private:
     juce::TextButton stopAllButton;
     juce::Slider rateSlider;
     PillBar stateTabs;
+    ArrangementStripComponent arrangementStrip;
     FsmNavigatorComponent navigator;
     juce::Label stateInfoTitle;
     juce::Label nestedSectionTitle;
@@ -6434,8 +7383,14 @@ private:
     juce::String scLog;
     bool logVisible = false;
     bool codeExpanded = false;
+    bool arrangementViewVisible = false;
     bool fsmRunning = false;
     bool machinePrepared = false;
+    bool exportInProgress = false;
+    bool exportCancelRequested = false;
+    double exportElapsedSeconds = 0.0;
+    double exportTotalSeconds = 0.0;
+    juce::String exportOutputPath;
     InspectorMode inspectorMode = InspectorMode::tracks;
     int rulesPaneWidth = 500;
     int tracksPaneWidth = 210;
@@ -6469,11 +7424,13 @@ private:
     juce::StringArray recentProjects;
     juce::AudioDeviceManager audioDeviceManager;
     std::unique_ptr<SettingsWindow> settingsWindow;
+    std::unique_ptr<AudioExportWindow> exportWindow;
     bool dirtyProject = false;
     bool loadingProjectInternally = false;
     bool suppressUndoCapture = false;
     bool colourblindSafeMode = false;
     SuperColliderAudioSettings scAudioSettings;
+    AudioExportSettings exportSettings;
     juce::String lastProjectSnapshot;
     std::vector<juce::String> undoSnapshots;
     std::vector<juce::String> redoSnapshots;
@@ -6522,6 +7479,8 @@ private:
         loadProjectItem,
         saveProjectItem,
         saveProjectAsItem,
+        exportAudioItem,
+        cancelExportItem,
         settingsItem,
         aboutItem
     };
@@ -6544,6 +7503,9 @@ private:
             menu.addSeparator();
             menu.addItem (saveProjectItem, "Save");
             menu.addItem (saveProjectAsItem, "Save As...");
+            menu.addSeparator();
+            menu.addItem (exportAudioItem, "Export Audio...");
+            menu.addItem (cancelExportItem, "Cancel Export");
             menu.addSeparator();
             menu.addItem (settingsItem, "Settings...");
             menu.addSeparator();
@@ -6571,6 +7533,8 @@ private:
             case loadProjectItem:    main->loadProject(); break;
             case saveProjectItem:    main->saveCurrentProject(); break;
             case saveProjectAsItem:  main->saveProjectAs(); break;
+            case exportAudioItem:    main->exportAudio(); break;
+            case cancelExportItem:   main->cancelAudioExport(); break;
             case settingsItem:       main->showSettings(); break;
             case aboutItem:          main->showAbout(); break;
             default: break;
