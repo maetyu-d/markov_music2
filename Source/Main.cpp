@@ -1466,10 +1466,11 @@ class ArrangementStripComponent final : public juce::Component
 public:
     std::function<void (int)> onStateSelected;
 
-    void setMachine (MachineModel& rootMachine, double playbackRate, bool exporting, double exportElapsed, double exportTotal)
+    void setMachine (MachineModel& rootMachine, double playbackRate, bool showExtended, bool exporting, double exportElapsed, double exportTotal)
     {
         machine = &rootMachine;
         rate = juce::jmax (0.05, playbackRate);
+        extended = showExtended;
         exportInProgress = exporting;
         exportElapsedSeconds = exportElapsed;
         exportTotalSeconds = exportTotal;
@@ -1503,6 +1504,12 @@ public:
         g.drawFittedText (juce::String (machine->getStateCount()) + " sections  "
                             + juce::String (total, 1) + "s cycle  x" + juce::String (rate, 2),
                           titleArea, juce::Justification::centredLeft, 1);
+        if (extended)
+        {
+            g.setColour (accentA().withAlpha (0.82f));
+            g.setFont (juce::FontOptions (9.5f, juce::Font::bold));
+            g.drawFittedText ("nested + lanes", titleArea.removeFromRight (96), juce::Justification::centredRight, 1);
+        }
 
         auto timeline = timelineArea();
         g.setColour (juce::Colour (0xff0c0f14).withAlpha (0.58f));
@@ -1581,7 +1588,11 @@ private:
                     g.drawRoundedRectangle (segment.reduced (0.5f), 5.0f, 0.7f);
                 }
 
-                drawSectionText (g, segment, state, i, seconds, colour, selected);
+                auto textSegment = extended ? segment.withHeight (juce::jmin (54.0f, segment.getHeight() * 0.56f))
+                                            : segment;
+                drawSectionText (g, textSegment, state, i, seconds, colour, selected);
+                if (extended)
+                    drawExtendedDetails (g, segment.withTrimmedTop (textSegment.getHeight() + 2.0f), state, i, colour, selected);
             }
 
             x += width;
@@ -1630,6 +1641,119 @@ private:
             g.setColour (mutedInk().withAlpha (selected ? 0.74f : 0.50f));
             g.setFont (juce::FontOptions (9.0f));
             g.drawFittedText (holdText + "  " + detail, textArea.removeFromTop (13), juce::Justification::centredLeft, 1);
+        }
+    }
+
+    void drawExtendedDetails (juce::Graphics& g,
+                              juce::Rectangle<float> area,
+                              const State& state,
+                              int stateIndex,
+                              juce::Colour colour,
+                              bool selected)
+    {
+        if (area.getHeight() < 22.0f || area.getWidth() < 34.0f)
+            return;
+
+        auto nestedArea = area.withHeight (juce::jmin (22.0f, area.getHeight() * 0.52f)).reduced (7.0f, 2.0f);
+        auto laneArea = area.withTrimmedTop (nestedArea.getHeight() + 5.0f).reduced (7.0f, 1.0f);
+
+        if (const auto* child = machine->childMachine (stateIndex))
+            drawNestedMachineSummary (g, nestedArea, *child, colour, selected);
+        else if (area.getWidth() > 96.0f)
+        {
+            g.setColour (hairline().withAlpha (0.24f));
+            g.drawHorizontalLine (juce::roundToInt (nestedArea.getCentreY()), nestedArea.getX(), nestedArea.getRight());
+        }
+
+        drawLaneSummary (g, laneArea, state, colour, selected);
+    }
+
+    void drawNestedMachineSummary (juce::Graphics& g,
+                                   juce::Rectangle<float> area,
+                                   const MachineModel& child,
+                                   juce::Colour parentColour,
+                                   bool parentSelected)
+    {
+        if (child.getStateCount() <= 0 || area.getWidth() < 18.0f)
+            return;
+
+        g.setColour (parentColour.withAlpha (parentSelected ? 0.18f : 0.10f));
+        g.fillRoundedRectangle (area, 3.0f);
+        g.setColour (parentColour.withAlpha (parentSelected ? 0.62f : 0.36f));
+        g.drawRoundedRectangle (area.reduced (0.5f), 3.0f, 0.7f);
+
+        auto x = area.getX() + 2.0f;
+        const auto gap = 2.0f;
+        const auto cellWidth = juce::jmax (3.0f, (area.getWidth() - 4.0f - gap * static_cast<float> (child.getStateCount() - 1))
+                                                  / static_cast<float> (child.getStateCount()));
+        for (int i = 0; i < child.getStateCount(); ++i)
+        {
+            auto cell = juce::Rectangle<float> (x, area.getY() + 2.0f, cellWidth, area.getHeight() - 4.0f);
+            const auto childColour = graphColour (i, 2);
+            const auto childSelected = i == child.selectedState;
+            g.setColour (rowFill().interpolatedWith (childColour, childSelected ? 0.30f : 0.16f).withAlpha (0.92f));
+            g.fillRoundedRectangle (cell, 2.0f);
+            g.setColour (childSelected ? childColour.brighter (0.10f).withAlpha (0.95f) : childColour.withAlpha (0.50f));
+            g.drawRoundedRectangle (cell.reduced (0.25f), 2.0f, childSelected ? 1.0f : 0.55f);
+
+            if (const auto* grandchild = child.childMachine (i))
+            {
+                auto mark = cell.removeFromBottom (2.0f).reduced (1.0f, 0.0f);
+                g.setColour (graphColour (i, 5).withAlpha (0.86f));
+                g.fillRoundedRectangle (mark, 1.0f);
+                juce::ignoreUnused (grandchild);
+            }
+
+            if (cellWidth > 24.0f)
+            {
+                g.setFont (juce::FontOptions (7.5f, juce::Font::bold));
+                g.setColour (ink().withAlpha (childSelected ? 0.80f : 0.46f));
+                g.drawFittedText (juce::String (i + 1), cell.toNearestInt().reduced (1, 0), juce::Justification::centred, 1);
+            }
+            x += cellWidth + gap;
+        }
+    }
+
+    void drawLaneSummary (juce::Graphics& g,
+                          juce::Rectangle<float> area,
+                          const State& state,
+                          juce::Colour stateColour,
+                          bool selected)
+    {
+        if (state.lanes.empty() || area.getHeight() < 9.0f || area.getWidth() < 18.0f)
+            return;
+
+        g.setColour (juce::Colour (0xff0d1015).withAlpha (selected ? 0.70f : 0.46f));
+        g.fillRoundedRectangle (area, 3.0f);
+
+        auto x = area.getX() + 5.0f;
+        const auto dotRadius = 3.0f;
+        const auto maxDots = juce::jlimit (1, static_cast<int> (state.lanes.size()),
+                                           juce::jmax (1, juce::roundToInt ((area.getWidth() - 10.0f) / 11.0f)));
+        for (int i = 0; i < maxDots; ++i)
+        {
+            const auto& lane = state.lanes[static_cast<size_t> (i)];
+            auto laneColour = graphColour (i, state.index).interpolatedWith (stateColour, 0.24f);
+            if (! lane.enabled || lane.muted)
+                laneColour = mutedInk().withAlpha (0.42f);
+
+            g.setColour (laneColour.withAlpha (lane.solo ? 1.0f : 0.86f));
+            g.fillEllipse (x, area.getCentreY() - dotRadius, dotRadius * 2.0f, dotRadius * 2.0f);
+            if (lane.frozen)
+            {
+                g.setColour (ink().withAlpha (0.58f));
+                g.drawEllipse (x - 1.0f, area.getCentreY() - dotRadius - 1.0f, dotRadius * 2.0f + 2.0f, dotRadius * 2.0f + 2.0f, 0.65f);
+            }
+            x += 11.0f;
+        }
+
+        if (area.getWidth() > 78.0f)
+        {
+            const auto text = juce::String (state.lanes.size()) + (state.lanes.size() == 1 ? " lane" : " lanes");
+            g.setColour (mutedInk().withAlpha (selected ? 0.76f : 0.54f));
+            g.setFont (juce::FontOptions (8.6f, juce::Font::bold));
+            g.drawFittedText (text, area.toNearestInt().removeFromRight (54).reduced (2, 0),
+                              juce::Justification::centredRight, 1);
         }
     }
 
@@ -1713,6 +1837,7 @@ private:
 
     MachineModel* machine = nullptr;
     double rate = 1.0;
+    bool extended = false;
     bool exportInProgress = false;
     double exportElapsedSeconds = 0.0;
     double exportTotalSeconds = 0.0;
@@ -3900,7 +4025,7 @@ public:
         graphLayoutButton.onClick = [this] { graph.resetLayout(); };
         arrangementViewButton.onClick = [this]
         {
-            arrangementViewVisible = ! arrangementViewVisible;
+            arrangementViewMode = (arrangementViewMode + 1) % 3;
             saveAppState();
             resized();
             refreshControls();
@@ -4584,7 +4709,8 @@ public:
         addButton (graphLayoutButton, 66);
 
         const auto horizontalDividerHeight = 8;
-        const auto arrangementHeight = arrangementViewVisible ? 108 : 0;
+        const auto arrangementVisible = arrangementViewMode > 0;
+        const auto arrangementHeight = arrangementVisible ? (arrangementViewMode == 2 ? 148 : 108) : 0;
         const auto topWorkspaceHeight = 36 + arrangementHeight;
         const auto minGraphHeight = codeExpanded ? 112 : 230;
         const auto minBottomHeight = codeExpanded ? 320 : 170;
@@ -4741,7 +4867,7 @@ public:
         scriptEditor.setBounds (codePaneInner.reduced (0, 6));
 
         stateTabs.setBounds (workspace.removeFromTop (36));
-        if (arrangementViewVisible)
+        if (arrangementVisible)
             arrangementStrip.setBounds (workspace.removeFromTop (arrangementHeight).reduced (5, 6));
         else
             arrangementStrip.setBounds ({});
@@ -5107,8 +5233,8 @@ private:
         statusLabel.setText ("Exporting " + juce::String (exportElapsedSeconds, 1)
                              + " / " + juce::String (exportTotalSeconds, 1) + "s",
                              juce::dontSendNotification);
-        if (arrangementViewVisible)
-            arrangementStrip.setMachine (machine, rateSlider.getValue(), exportInProgress, exportElapsedSeconds, exportTotalSeconds);
+        if (arrangementViewMode > 0)
+            arrangementStrip.setMachine (machine, rateSlider.getValue(), arrangementViewMode == 2, exportInProgress, exportElapsedSeconds, exportTotalSeconds);
     }
 
     void handleMeterMessage (const juce::OSCMessage& message)
@@ -5200,7 +5326,8 @@ private:
         object->setProperty ("lastProject", currentProjectFile.getFullPathName());
         object->setProperty ("lastAutosave", autosaveFile().getFullPathName());
         object->setProperty ("colourblindSafeMode", colourblindSafeMode);
-        object->setProperty ("arrangementViewVisible", arrangementViewVisible);
+        object->setProperty ("arrangementViewMode", arrangementViewMode);
+        object->setProperty ("arrangementViewVisible", arrangementViewMode > 0);
         object->setProperty ("scOutputDevice", scAudioSettings.outputDevice);
         object->setProperty ("scSampleRate", scAudioSettings.sampleRate);
         object->setProperty ("scHardwareBufferSize", scAudioSettings.hardwareBufferSize);
@@ -5237,7 +5364,8 @@ private:
 
         colourblindSafeMode = static_cast<bool> (parsed.getProperty ("colourblindSafeMode", false));
         setColourblindSafePalette (colourblindSafeMode);
-        arrangementViewVisible = static_cast<bool> (parsed.getProperty ("arrangementViewVisible", false));
+        arrangementViewMode = juce::jlimit (0, 2, static_cast<int> (parsed.getProperty ("arrangementViewMode",
+                                                                                         static_cast<bool> (parsed.getProperty ("arrangementViewVisible", false)) ? 1 : 0)));
         scAudioSettings.outputDevice = parsed.getProperty ("scOutputDevice", {}).toString().trim();
         scAudioSettings.sampleRate = static_cast<double> (parsed.getProperty ("scSampleRate", 0.0));
         scAudioSettings.hardwareBufferSize = static_cast<int> (parsed.getProperty ("scHardwareBufferSize", 64));
@@ -7250,14 +7378,16 @@ private:
             nestedDivisionEditor.setText ("-", false);
         }
         topStateCountEditor.setText (juce::String (machine.getStateCount()), false);
-        arrangementStrip.setVisible (arrangementViewVisible);
-        arrangementStrip.setMachine (machine, rateSlider.getValue(), exportInProgress, exportElapsedSeconds, exportTotalSeconds);
+        const auto arrangementVisible = arrangementViewMode > 0;
+        arrangementStrip.setVisible (arrangementVisible);
+        arrangementStrip.setMachine (machine, rateSlider.getValue(), arrangementViewMode == 2, exportInProgress, exportElapsedSeconds, exportTotalSeconds);
+        arrangementViewButton.setButtonText (arrangementViewMode == 2 ? "Arrange+" : "Arrange");
         arrangementViewButton.setColour (juce::TextButton::buttonColourId,
-                                         arrangementViewVisible ? rowFill().interpolatedWith (graphColour (machine.selectedState + 2), 0.20f)
-                                                                : panelFill().brighter (0.04f));
+                                         arrangementVisible ? rowFill().interpolatedWith (graphColour (machine.selectedState + 2), arrangementViewMode == 2 ? 0.30f : 0.20f)
+                                                            : panelFill().brighter (0.04f));
         arrangementViewButton.setColour (juce::TextButton::textColourOffId,
-                                         arrangementViewVisible ? graphColour (machine.selectedState + 2).brighter (0.12f)
-                                                                : mutedInk());
+                                         arrangementVisible ? graphColour (machine.selectedState + 2).brighter (0.12f)
+                                                            : mutedInk());
         const auto selectedLanePlaying = currentInspectorMachine().selectedLaneRef().playing;
         playButton.setButtonText (selectedLanePlaying ? "Stop" : "Play");
         playButton.setColour (juce::TextButton::buttonColourId,
@@ -7395,7 +7525,7 @@ private:
     juce::String scLog;
     bool logVisible = false;
     bool codeExpanded = false;
-    bool arrangementViewVisible = false;
+    int arrangementViewMode = 0;
     bool fsmRunning = false;
     bool machinePrepared = false;
     bool exportInProgress = false;
