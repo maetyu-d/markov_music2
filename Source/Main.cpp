@@ -1465,6 +1465,8 @@ class ArrangementStripComponent final : public juce::Component
 {
 public:
     std::function<void (int)> onStateSelected;
+    std::function<void (int, int)> onNestedStateSelected;
+    std::function<void (int, int)> onLaneSelected;
 
     void setMachine (MachineModel& rootMachine, double playbackRate, bool showExtended, bool exporting, double exportElapsed, double exportTotal)
     {
@@ -1474,13 +1476,79 @@ public:
         exportInProgress = exporting;
         exportElapsedSeconds = exportElapsed;
         exportTotalSeconds = exportTotal;
+        clampScroll();
         repaint();
     }
 
     void mouseDown (const juce::MouseEvent& event) override
     {
+        if (extended)
+        {
+            if (handleZoomControlClick (event.position))
+                return;
+
+            if (auto hit = hitTestExtended (event.position); hit.kind != Hit::none)
+            {
+                if (hit.kind == Hit::nestedState && onNestedStateSelected)
+                    onNestedStateSelected (hit.stateIndex, hit.detailIndex);
+                else if (hit.kind == Hit::lane && onLaneSelected)
+                    onLaneSelected (hit.stateIndex, hit.detailIndex);
+                else if (onStateSelected)
+                    onStateSelected (hit.stateIndex);
+                return;
+            }
+        }
+
         if (const auto index = stateIndexAt (event.position); index >= 0 && onStateSelected)
             onStateSelected (index);
+    }
+
+    void mouseMove (const juce::MouseEvent& event) override
+    {
+        auto nextHover = hitAt (event.position);
+        const auto zoomControl = extended ? zoomControlAt (event.position) : ZoomControl::none;
+        const auto interactive = nextHover.kind != Hit::none || zoomControl != ZoomControl::none;
+
+        setMouseCursor (interactive ? juce::MouseCursor::PointingHandCursor
+                                    : juce::MouseCursor::NormalCursor);
+        const auto nextHint = zoomControl != ZoomControl::none ? zoomTooltip (zoomControl)
+                                                               : tooltipFor (nextHover);
+
+        if (! sameHit (hoveredHit, nextHover) || hoveredZoomControl != zoomControl || hoverHint != nextHint)
+        {
+            hoveredHit = nextHover;
+            hoveredZoomControl = zoomControl;
+            hoverHint = nextHint;
+            repaint();
+        }
+    }
+
+    void mouseExit (const juce::MouseEvent&) override
+    {
+        hoveredHit = {};
+        hoveredZoomControl = ZoomControl::none;
+        hoverHint = {};
+        setMouseCursor (juce::MouseCursor::NormalCursor);
+        repaint();
+    }
+
+    void mouseWheelMove (const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) override
+    {
+        if (! extended)
+            return;
+
+        if (event.mods.isCommandDown() || event.mods.isCtrlDown())
+        {
+            const auto factor = wheel.deltaY > 0.0f ? 1.12f : 0.89f;
+            setArrangementZoom (arrangementZoom * factor, event.position.x);
+        }
+        else
+        {
+            arrangementScrollX -= (std::abs (wheel.deltaX) > std::abs (wheel.deltaY) ? wheel.deltaX : wheel.deltaY) * 140.0f;
+        }
+
+        clampScroll();
+        repaint();
     }
 
     void paint (juce::Graphics& g) override
@@ -1506,9 +1574,13 @@ public:
                           titleArea, juce::Justification::centredLeft, 1);
         if (extended)
         {
+            drawZoomControls (g);
             g.setColour (accentA().withAlpha (0.82f));
             g.setFont (juce::FontOptions (9.5f, juce::Font::bold));
-            g.drawFittedText ("nested + lanes", titleArea.removeFromRight (96), juce::Justification::centredRight, 1);
+            titleArea.removeFromRight (170);
+            auto hintArea = titleArea.removeFromRight (150);
+            g.drawFittedText (hoverHint.isNotEmpty() ? hoverHint : "nested + lanes",
+                              hintArea, juce::Justification::centredRight, 1);
         }
 
         auto timeline = timelineArea();
@@ -1520,6 +1592,8 @@ public:
 
         auto content = contentArea (timeline);
         juce::Rectangle<float> flowArea;
+        g.saveState();
+        g.reduceClipRegion (content.toNearestInt());
         if (extended)
             flowArea = drawExtendedTimeline (g, timeline, content, total);
         else
@@ -1528,9 +1602,56 @@ public:
         drawTransitionFlow (g, content, total, flowArea);
         drawRuler (g, content, total);
         drawExportProgress (g, content, total);
+        drawHoverHighlight (g, content, total);
+        g.restoreState();
     }
 
 private:
+    struct Hit
+    {
+        enum Kind
+        {
+            none,
+            topState,
+            nestedState,
+            lane
+        };
+
+        Kind kind = none;
+        int stateIndex = -1;
+        int detailIndex = -1;
+    };
+
+    enum class ZoomControl
+    {
+        none,
+        zoomOut,
+        readout,
+        zoomIn,
+        fit
+    };
+
+    struct ZoomControlBounds
+    {
+        juce::Rectangle<float> out;
+        juce::Rectangle<float> readout;
+        juce::Rectangle<float> in;
+        juce::Rectangle<float> fit;
+    };
+
+    struct ExtendedRows
+    {
+        juce::Rectangle<float> top;
+        juce::Rectangle<float> flow;
+        juce::Rectangle<float> nested;
+        juce::Rectangle<float> lanes;
+    };
+
+    static bool sameHit (Hit a, Hit b)
+    {
+        return a.kind == b.kind && a.stateIndex == b.stateIndex && a.detailIndex == b.detailIndex;
+    }
+
     double stateDurationSeconds (const State& state) const
     {
         return juce::jmax (0.1, state.secondsPerBar() / rate);
@@ -1555,16 +1676,51 @@ private:
                         : timeline.reduced (0.0f, 2.0f);
     }
 
+    ExtendedRows extendedRowsFor (juce::Rectangle<float> content) const
+    {
+        auto rows = content.withTrimmedTop (22.0f).reduced (0.0f, 8.0f);
+        const auto usableHeight = rows.getHeight();
+        ExtendedRows result;
+        result.top = rows.removeFromTop (juce::jlimit (62.0f, 92.0f, usableHeight * 0.19f));
+        rows.removeFromTop (10.0f);
+        result.flow = rows.removeFromTop (juce::jlimit (112.0f, 180.0f, usableHeight * 0.36f));
+        rows.removeFromTop (12.0f);
+        result.nested = rows.removeFromTop (juce::jlimit (48.0f, 72.0f, usableHeight * 0.16f));
+        rows.removeFromTop (10.0f);
+        result.lanes = rows.withHeight (juce::jmin (86.0f, rows.getHeight()));
+        return result;
+    }
+
+    float maxScrollFor (juce::Rectangle<float> area) const
+    {
+        return extended ? juce::jmax (0.0f, area.getWidth() * (arrangementZoom - 1.0f))
+                        : 0.0f;
+    }
+
+    void clampScroll()
+    {
+        if (machine == nullptr)
+        {
+            arrangementScrollX = 0.0f;
+            return;
+        }
+
+        arrangementScrollX = juce::jlimit (0.0f, maxScrollFor (contentArea (timelineArea())), arrangementScrollX);
+    }
+
     juce::Rectangle<float> sectionBounds (juce::Rectangle<float> area, double total, int stateIndex, bool withGap = true) const
     {
-        auto x = area.getX();
+        const auto zoom = extended ? arrangementZoom : 1.0f;
+        const auto scroll = extended ? arrangementScrollX : 0.0f;
+        const auto contentWidth = area.getWidth() * zoom;
+        auto x = area.getX() - scroll;
         for (int i = 0; i < machine->getStateCount(); ++i)
         {
-            const auto width = i == machine->getStateCount() - 1 ? area.getRight() - x
-                                                                 : area.getWidth() * static_cast<float> (stateDurationSeconds (machine->state (i)) / total);
+            const auto width = i == machine->getStateCount() - 1 ? area.getX() - scroll + contentWidth - x
+                                                                 : contentWidth * static_cast<float> (stateDurationSeconds (machine->state (i)) / total);
             if (i == stateIndex)
                 return juce::Rectangle<float> (x, area.getY(),
-                                               juce::jmax (1.0f, juce::jmin (width - (withGap ? 4.0f : 0.0f), area.getRight() - x)),
+                                               juce::jmax (1.0f, width - (withGap ? 4.0f : 0.0f)),
                                                area.getHeight());
             x += width;
         }
@@ -1572,20 +1728,25 @@ private:
         return {};
     }
 
+    Hit hitAt (juce::Point<float> point) const
+    {
+        if (extended)
+            return hitTestExtended (point);
+
+        const auto index = stateIndexAt (point);
+        return index >= 0 ? Hit { Hit::topState, index, -1 } : Hit {};
+    }
+
     void drawSections (juce::Graphics& g, juce::Rectangle<float> area, double total, bool includeExtendedDetails = true)
     {
         g.saveState();
         g.reduceClipRegion (area.toNearestInt().expanded (6, 6));
 
-        auto x = area.getX();
         for (int i = 0; i < machine->getStateCount(); ++i)
         {
             const auto& state = machine->state (i);
             const auto seconds = stateDurationSeconds (state);
-            const auto proportion = static_cast<float> (seconds / total);
-            const auto width = i == machine->getStateCount() - 1 ? area.getRight() - x
-                                                                 : area.getWidth() * proportion;
-            auto segment = juce::Rectangle<float> (x, area.getY(), juce::jmax (1.0f, juce::jmin (width - 4.0f, area.getRight() - x)), area.getHeight());
+            auto segment = sectionBounds (area, total, i);
             const auto colour = graphColour (i);
             const auto selected = i == machine->selectedState;
 
@@ -1625,9 +1786,6 @@ private:
                     drawExtendedDetails (g, segment.withTrimmedTop (textSegment.getHeight() + 2.0f), state, i, colour, selected);
             }
 
-            x += width;
-            if (x >= area.getRight() - 1.0f)
-                break;
         }
 
         g.restoreState();
@@ -1638,24 +1796,16 @@ private:
                                                  juce::Rectangle<float> content,
                                                  double total)
     {
-        auto rows = content.withTrimmedTop (22.0f).reduced (0.0f, 8.0f);
-        const auto usableHeight = rows.getHeight();
-        auto topRow = rows.removeFromTop (juce::jlimit (62.0f, 92.0f, usableHeight * 0.19f));
-        rows.removeFromTop (10.0f);
-        auto flowRow = rows.removeFromTop (juce::jlimit (112.0f, 180.0f, usableHeight * 0.36f));
-        rows.removeFromTop (12.0f);
-        auto nestedRow = rows.removeFromTop (juce::jlimit (48.0f, 72.0f, usableHeight * 0.16f));
-        rows.removeFromTop (10.0f);
-        auto lanesRow = rows.withHeight (juce::jmin (86.0f, rows.getHeight()));
+        const auto rows = extendedRowsFor (content);
 
-        drawRowLabels (g, timeline.withWidth (64.0f).withY (topRow.getY()).withHeight (lanesRow.getBottom() - topRow.getY()),
-                       topRow, flowRow, nestedRow, lanesRow);
+        drawRowLabels (g, timeline.withWidth (64.0f).withY (rows.top.getY()).withHeight (rows.lanes.getBottom() - rows.top.getY()),
+                       rows.top, rows.flow, rows.nested, rows.lanes);
         g.setColour (juce::Colour (0xff0c0f14).withAlpha (0.38f));
-        g.fillRoundedRectangle (flowRow.reduced (0.0f, 2.0f), 6.0f);
-        drawSections (g, topRow, total, false);
-        drawNestedRow (g, nestedRow, total);
-        drawLanesRow (g, lanesRow, total);
-        return flowRow.reduced (0.0f, 3.0f);
+        g.fillRoundedRectangle (rows.flow.reduced (0.0f, 2.0f), 6.0f);
+        drawSections (g, rows.top, total, false);
+        drawNestedRow (g, rows.nested, total);
+        drawLanesRow (g, rows.lanes, total);
+        return rows.flow.reduced (0.0f, 3.0f);
     }
 
     void drawRowLabels (juce::Graphics& g,
@@ -1681,6 +1831,223 @@ private:
         drawLabel ("Flow", flowRow);
         drawLabel ("Nested", nestedRow);
         drawLabel ("Lanes", lanesRow);
+    }
+
+    Hit hitTestExtended (juce::Point<float> point) const
+    {
+        if (machine == nullptr || machine->states.empty())
+            return {};
+
+        const auto total = totalSeconds();
+        if (total <= 0.0)
+            return {};
+
+        auto timeline = timelineArea();
+        auto content = contentArea (timeline);
+        const auto rows = extendedRowsFor (content);
+
+        for (int i = 0; i < machine->getStateCount(); ++i)
+        {
+            auto top = sectionBounds (rows.top, total, i, false);
+            if (top.contains (point))
+                return { Hit::topState, i, -1 };
+
+            auto nested = sectionBounds (rows.nested, total, i, false).reduced (5.0f, 2.0f);
+            if (nested.contains (point))
+            {
+                if (auto* child = machine->childMachine (i))
+                    return { Hit::nestedState, i, childStateIndexAt (*child, nested, point) };
+                return { Hit::topState, i, -1 };
+            }
+
+            auto lanes = sectionBounds (rows.lanes, total, i, false).reduced (5.0f, 2.0f);
+            if (lanes.contains (point))
+                return { Hit::lane, i, laneIndexAt (machine->state (i), lanes, point) };
+        }
+
+        return {};
+    }
+
+    int childStateIndexAt (const MachineModel& child, juce::Rectangle<float> area, juce::Point<float> point) const
+    {
+        if (child.getStateCount() <= 0)
+            return 0;
+
+        auto inner = area.reduced (5.0f, 5.0f);
+        const auto gap = 3.0f;
+        const auto cellWidth = juce::jmax (8.0f, (inner.getWidth() - gap * static_cast<float> (child.getStateCount() - 1))
+                                                  / static_cast<float> (child.getStateCount()));
+        const auto index = static_cast<int> ((point.x - inner.getX()) / juce::jmax (1.0f, cellWidth + gap));
+        return juce::jlimit (0, child.getStateCount() - 1, index);
+    }
+
+    int laneIndexAt (const State& state, juce::Rectangle<float> area, juce::Point<float> point) const
+    {
+        if (state.lanes.empty())
+            return 0;
+
+        auto laneTrack = area.reduced (8.0f, juce::jmax (5.0f, area.getHeight() * 0.30f));
+        if (area.getWidth() > 92.0f)
+            laneTrack.removeFromRight (52.0f);
+
+        const auto gap = 3.0f;
+        const auto maxDots = juce::jlimit (1, static_cast<int> (state.lanes.size()),
+                                           juce::jmax (1, juce::roundToInt (laneTrack.getWidth() / 17.0f)));
+        const auto chipWidth = juce::jmax (9.0f, juce::jmin (22.0f, (laneTrack.getWidth() - gap * static_cast<float> (maxDots - 1))
+                                                                  / static_cast<float> (maxDots)));
+        const auto index = static_cast<int> ((point.x - laneTrack.getX()) / juce::jmax (1.0f, chipWidth + gap));
+        return juce::jlimit (0, static_cast<int> (state.lanes.size()) - 1, index);
+    }
+
+    juce::String tooltipFor (Hit hit) const
+    {
+        if (machine == nullptr || hit.stateIndex < 0 || hit.stateIndex >= machine->getStateCount())
+            return {};
+
+        const auto& state = machine->state (hit.stateIndex);
+        if (hit.kind == Hit::nestedState)
+            return "Select nested state " + juce::String (hit.detailIndex + 1) + " in " + state.name;
+        if (hit.kind == Hit::lane)
+        {
+            if (hit.detailIndex >= 0 && hit.detailIndex < static_cast<int> (state.lanes.size()))
+                return "Select track: " + state.lanes[static_cast<size_t> (hit.detailIndex)].name;
+            return "Select tracks in " + state.name;
+        }
+        if (hit.kind == Hit::topState)
+            return "Select " + state.name;
+
+        return {};
+    }
+
+    juce::String zoomTooltip (ZoomControl control) const
+    {
+        if (control == ZoomControl::zoomOut)
+            return "Zoom arrangement out";
+        if (control == ZoomControl::zoomIn)
+            return "Zoom arrangement in";
+        if (control == ZoomControl::fit)
+            return "Fit whole arrangement";
+        if (control == ZoomControl::readout)
+            return "Arrangement zoom";
+        return {};
+    }
+
+    ZoomControlBounds zoomControlBounds() const
+    {
+        const auto top = getLocalBounds().toFloat().reduced (12.0f, 7.0f).withHeight (22.0f);
+        auto x = top.getRight() - 154.0f;
+        const auto y = top.getY() + 1.0f;
+        const auto h = 19.0f;
+        const auto gap = 5.0f;
+        ZoomControlBounds bounds;
+        bounds.out = { x, y, 23.0f, h };
+        x += bounds.out.getWidth() + gap;
+        bounds.readout = { x, y, 52.0f, h };
+        x += bounds.readout.getWidth() + gap;
+        bounds.in = { x, y, 23.0f, h };
+        x += bounds.in.getWidth() + gap;
+        bounds.fit = { x, y, 46.0f, h };
+        return bounds;
+    }
+
+    ZoomControl zoomControlAt (juce::Point<float> point) const
+    {
+        const auto controls = zoomControlBounds();
+        if (controls.out.contains (point))     return ZoomControl::zoomOut;
+        if (controls.readout.contains (point)) return ZoomControl::readout;
+        if (controls.in.contains (point))      return ZoomControl::zoomIn;
+        if (controls.fit.contains (point))     return ZoomControl::fit;
+        return ZoomControl::none;
+    }
+
+    bool handleZoomControlClick (juce::Point<float> point)
+    {
+        const auto control = zoomControlAt (point);
+        if (control == ZoomControl::none)
+            return false;
+
+        if (control == ZoomControl::zoomOut)
+            setArrangementZoom (arrangementZoom / 1.25f, point.x);
+        else if (control == ZoomControl::zoomIn)
+            setArrangementZoom (arrangementZoom * 1.25f, point.x);
+        else if (control == ZoomControl::fit || control == ZoomControl::readout)
+        {
+            arrangementZoom = 1.0f;
+            arrangementScrollX = 0.0f;
+        }
+
+        repaint();
+        return true;
+    }
+
+    void setArrangementZoom (float newZoom, float anchorX)
+    {
+        const auto oldZoom = arrangementZoom;
+        arrangementZoom = juce::jlimit (1.0f, 6.0f, newZoom);
+
+        auto visible = contentArea (timelineArea());
+        const auto mouseInContent = juce::jlimit (0.0f, visible.getWidth(), anchorX - visible.getX());
+        const auto worldX = (arrangementScrollX + mouseInContent) / juce::jmax (0.001f, oldZoom);
+        arrangementScrollX = worldX * arrangementZoom - mouseInContent;
+        clampScroll();
+    }
+
+    void drawZoomButton (juce::Graphics& g, juce::Rectangle<float> bounds, juce::String text, bool hovered, bool filled = false)
+    {
+        g.setColour ((filled ? rowFill().brighter (0.05f) : juce::Colour (0xff12171f))
+                         .interpolatedWith (accentA(), hovered ? 0.18f : 0.06f)
+                         .withAlpha (0.92f));
+        g.fillRoundedRectangle (bounds, 4.0f);
+        g.setColour ((hovered ? accentA().brighter (0.12f) : hairline()).withAlpha (hovered ? 0.82f : 0.48f));
+        g.drawRoundedRectangle (bounds.reduced (0.5f), 4.0f, hovered ? 1.2f : 0.8f);
+        g.setFont (juce::FontOptions (9.5f, juce::Font::bold));
+        g.setColour (ink().withAlpha (filled ? 0.92f : 0.78f));
+        g.drawFittedText (text, bounds.toNearestInt().reduced (2, 0), juce::Justification::centred, 1);
+    }
+
+    void drawZoomControls (juce::Graphics& g)
+    {
+        const auto controls = zoomControlBounds();
+        drawZoomButton (g, controls.out, "-", hoveredZoomControl == ZoomControl::zoomOut);
+        drawZoomButton (g, controls.readout, juce::String (juce::roundToInt (arrangementZoom * 100.0f)) + "%",
+                        hoveredZoomControl == ZoomControl::readout, true);
+        drawZoomButton (g, controls.in, "+", hoveredZoomControl == ZoomControl::zoomIn);
+        drawZoomButton (g, controls.fit, "Fit", hoveredZoomControl == ZoomControl::fit);
+    }
+
+    void drawHoverHighlight (juce::Graphics& g, juce::Rectangle<float> content, double total)
+    {
+        if (hoveredHit.kind == Hit::none || machine == nullptr || total <= 0.0)
+            return;
+
+        auto highlight = juce::Rectangle<float>();
+        auto colour = accentA();
+
+        if (extended)
+        {
+            const auto rows = extendedRowsFor (content);
+            colour = graphColour (hoveredHit.stateIndex);
+
+            if (hoveredHit.kind == Hit::topState)
+                highlight = sectionBounds (rows.top, total, hoveredHit.stateIndex, false).reduced (1.0f);
+            else if (hoveredHit.kind == Hit::nestedState)
+                highlight = sectionBounds (rows.nested, total, hoveredHit.stateIndex, false).reduced (5.0f, 2.0f);
+            else if (hoveredHit.kind == Hit::lane)
+                highlight = sectionBounds (rows.lanes, total, hoveredHit.stateIndex, false).reduced (5.0f, 2.0f);
+        }
+        else
+        {
+            colour = graphColour (hoveredHit.stateIndex);
+            highlight = sectionBounds (content, total, hoveredHit.stateIndex, false).reduced (1.0f);
+        }
+
+        if (highlight.isEmpty())
+            return;
+
+        g.setColour (colour.withAlpha (0.10f));
+        g.fillRoundedRectangle (highlight.expanded (3.0f, 3.0f), 7.0f);
+        g.setColour (colour.brighter (0.24f).withAlpha (0.92f));
+        g.drawRoundedRectangle (highlight, 6.0f, 1.3f);
     }
 
     void drawNestedRow (juce::Graphics& g, juce::Rectangle<float> area, double total)
@@ -1878,13 +2245,12 @@ private:
         g.setColour (hairline().withAlpha (0.30f));
         g.drawHorizontalLine (juce::roundToInt (baselineY), area.getX(), area.getRight());
 
-        auto x = area.getX();
         auto bar = 1;
         for (int i = 0; i < machine->getStateCount(); ++i)
         {
-            const auto width = i == machine->getStateCount() - 1 ? area.getRight() - x
-                                                                 : area.getWidth() * static_cast<float> (stateDurationSeconds (machine->state (i)) / total);
-            const auto tickX = x;
+            const auto bounds = sectionBounds (area, total, i, false);
+            const auto tickX = bounds.getX();
+            const auto width = bounds.getWidth();
             g.setColour (hairline().withAlpha (i == 0 ? 0.50f : 0.30f));
             g.drawVerticalLine (juce::roundToInt (tickX), baselineY - 5.0f, baselineY + 5.0f);
 
@@ -1896,8 +2262,6 @@ private:
                                   juce::Rectangle<int> (juce::roundToInt (tickX + 4.0f), juce::roundToInt (baselineY - 13.0f), 28, 11),
                                   juce::Justification::centredLeft, 1);
             }
-
-            x += width;
             ++bar;
         }
 
@@ -1986,18 +2350,11 @@ private:
 
         auto total = totalSeconds();
 
-        auto x = area.getX();
         for (int i = 0; i < machine->getStateCount(); ++i)
         {
-            const auto proportion = static_cast<float> (stateDurationSeconds (machine->state (i)) / total);
-            const auto width = i == machine->getStateCount() - 1 ? area.getRight() - x
-                                                                 : area.getWidth() * proportion;
-            const auto right = juce::jmin (x + width, area.getRight());
-            if (point.x >= x && point.x <= right)
+            const auto bounds = sectionBounds (area, total, i, false);
+            if (bounds.contains (point))
                 return i;
-            x += width;
-            if (x >= area.getRight() - 1.0f)
-                break;
         }
 
         return -1;
@@ -2006,9 +2363,14 @@ private:
     MachineModel* machine = nullptr;
     double rate = 1.0;
     bool extended = false;
+    float arrangementZoom = 1.0f;
+    float arrangementScrollX = 0.0f;
     bool exportInProgress = false;
     double exportElapsedSeconds = 0.0;
     double exportTotalSeconds = 0.0;
+    Hit hoveredHit;
+    ZoomControl hoveredZoomControl = ZoomControl::none;
+    juce::String hoverHint;
 };
 
 class FsmNavigatorComponent final : public juce::Component
@@ -4295,6 +4657,30 @@ public:
         {
             machine.selectedState = juce::jlimit (0, machine.getStateCount() - 1, newIndex);
             machine.selectedLane = 0;
+            inspectedMachine = &machine;
+            refreshControls();
+        };
+
+        arrangementStrip.onNestedStateSelected = [this] (int parentStateIndex, int childStateIndex)
+        {
+            machine.selectedState = juce::jlimit (0, machine.getStateCount() - 1, parentStateIndex);
+            if (auto* child = machine.childMachine (machine.selectedState))
+            {
+                child->selectedState = juce::jlimit (0, child->getStateCount() - 1, childStateIndex);
+                child->selectedLane = 0;
+                inspectedMachine = child;
+            }
+            else
+            {
+                inspectedMachine = &machine;
+            }
+            refreshControls();
+        };
+
+        arrangementStrip.onLaneSelected = [this] (int stateIndex, int laneIndex)
+        {
+            machine.selectedState = juce::jlimit (0, machine.getStateCount() - 1, stateIndex);
+            machine.selectedLane = juce::jlimit (0, machine.getLaneCount (machine.selectedState) - 1, laneIndex);
             inspectedMachine = &machine;
             refreshControls();
         };
