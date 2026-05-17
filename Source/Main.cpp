@@ -1501,7 +1501,7 @@ public:
         g.drawFittedText ("Arrangement", titleArea.removeFromLeft (112), juce::Justification::centredLeft, 1);
         g.setColour (mutedInk().withAlpha (0.74f));
         g.setFont (juce::FontOptions (10.5f));
-        g.drawFittedText (juce::String (machine->getStateCount()) + " sections  "
+        g.drawFittedText (juce::String (machine->getStateCount()) + " bars  "
                             + juce::String (total, 1) + "s cycle  x" + juce::String (rate, 2),
                           titleArea, juce::Justification::centredLeft, 1);
         if (extended)
@@ -1512,15 +1512,22 @@ public:
         }
 
         auto timeline = timelineArea();
-        g.setColour (juce::Colour (0xff0c0f14).withAlpha (0.58f));
+        g.setColour (juce::Colour (0xff0c0f14).withAlpha (0.60f));
         g.fillRoundedRectangle (timeline, 4.0f);
 
         if (total <= 0.0)
             return;
 
-        drawRuler (g, timeline, total);
-        drawSections (g, timeline, total);
-        drawExportProgress (g, timeline, total);
+        auto content = contentArea (timeline);
+        juce::Rectangle<float> flowArea;
+        if (extended)
+            flowArea = drawExtendedTimeline (g, timeline, content, total);
+        else
+            drawSections (g, content, total);
+
+        drawTransitionFlow (g, content, total, flowArea);
+        drawRuler (g, content, total);
+        drawExportProgress (g, content, total);
     }
 
 private:
@@ -1542,7 +1549,30 @@ private:
         return getLocalBounds().toFloat().reduced (12.0f, 8.0f).withTrimmedTop (26.0f).reduced (0.0f, 2.0f);
     }
 
-    void drawSections (juce::Graphics& g, juce::Rectangle<float> area, double total)
+    juce::Rectangle<float> contentArea (juce::Rectangle<float> timeline) const
+    {
+        return extended ? timeline.withTrimmedLeft (70.0f).reduced (0.0f, 1.0f)
+                        : timeline.reduced (0.0f, 2.0f);
+    }
+
+    juce::Rectangle<float> sectionBounds (juce::Rectangle<float> area, double total, int stateIndex, bool withGap = true) const
+    {
+        auto x = area.getX();
+        for (int i = 0; i < machine->getStateCount(); ++i)
+        {
+            const auto width = i == machine->getStateCount() - 1 ? area.getRight() - x
+                                                                 : area.getWidth() * static_cast<float> (stateDurationSeconds (machine->state (i)) / total);
+            if (i == stateIndex)
+                return juce::Rectangle<float> (x, area.getY(),
+                                               juce::jmax (1.0f, juce::jmin (width - (withGap ? 4.0f : 0.0f), area.getRight() - x)),
+                                               area.getHeight());
+            x += width;
+        }
+
+        return {};
+    }
+
+    void drawSections (juce::Graphics& g, juce::Rectangle<float> area, double total, bool includeExtendedDetails = true)
     {
         g.saveState();
         g.reduceClipRegion (area.toNearestInt().expanded (6, 6));
@@ -1591,7 +1621,7 @@ private:
                 auto textSegment = extended ? segment.withHeight (juce::jmin (54.0f, segment.getHeight() * 0.56f))
                                             : segment;
                 drawSectionText (g, textSegment, state, i, seconds, colour, selected);
-                if (extended)
+                if (extended && includeExtendedDetails)
                     drawExtendedDetails (g, segment.withTrimmedTop (textSegment.getHeight() + 2.0f), state, i, colour, selected);
             }
 
@@ -1601,6 +1631,83 @@ private:
         }
 
         g.restoreState();
+    }
+
+    juce::Rectangle<float> drawExtendedTimeline (juce::Graphics& g,
+                                                 juce::Rectangle<float> timeline,
+                                                 juce::Rectangle<float> content,
+                                                 double total)
+    {
+        auto rows = content.withTrimmedTop (22.0f).reduced (0.0f, 8.0f);
+        const auto usableHeight = rows.getHeight();
+        auto topRow = rows.removeFromTop (juce::jlimit (62.0f, 92.0f, usableHeight * 0.19f));
+        rows.removeFromTop (10.0f);
+        auto flowRow = rows.removeFromTop (juce::jlimit (112.0f, 180.0f, usableHeight * 0.36f));
+        rows.removeFromTop (12.0f);
+        auto nestedRow = rows.removeFromTop (juce::jlimit (48.0f, 72.0f, usableHeight * 0.16f));
+        rows.removeFromTop (10.0f);
+        auto lanesRow = rows.withHeight (juce::jmin (86.0f, rows.getHeight()));
+
+        drawRowLabels (g, timeline.withWidth (64.0f).withY (topRow.getY()).withHeight (lanesRow.getBottom() - topRow.getY()),
+                       topRow, flowRow, nestedRow, lanesRow);
+        g.setColour (juce::Colour (0xff0c0f14).withAlpha (0.38f));
+        g.fillRoundedRectangle (flowRow.reduced (0.0f, 2.0f), 6.0f);
+        drawSections (g, topRow, total, false);
+        drawNestedRow (g, nestedRow, total);
+        drawLanesRow (g, lanesRow, total);
+        return flowRow.reduced (0.0f, 3.0f);
+    }
+
+    void drawRowLabels (juce::Graphics& g,
+                        juce::Rectangle<float> labelArea,
+                        juce::Rectangle<float> topRow,
+                        juce::Rectangle<float> flowRow,
+                        juce::Rectangle<float> nestedRow,
+                        juce::Rectangle<float> lanesRow)
+    {
+        g.setColour (hairline().withAlpha (0.18f));
+        g.drawVerticalLine (juce::roundToInt (labelArea.getRight() - 6.0f), topRow.getY(), lanesRow.getBottom());
+
+        auto drawLabel = [&g, labelArea] (juce::String text, juce::Rectangle<float> row)
+        {
+            g.setFont (juce::FontOptions (10.5f, juce::Font::bold));
+            g.setColour (mutedInk().withAlpha (0.70f));
+            g.drawFittedText (text, juce::Rectangle<int> (juce::roundToInt (labelArea.getX() + 8.0f), juce::roundToInt (row.getY()),
+                                                          juce::roundToInt (labelArea.getWidth() - 16.0f), juce::roundToInt (row.getHeight())),
+                              juce::Justification::centredLeft, 1);
+        };
+
+        drawLabel ("Top", topRow);
+        drawLabel ("Flow", flowRow);
+        drawLabel ("Nested", nestedRow);
+        drawLabel ("Lanes", lanesRow);
+    }
+
+    void drawNestedRow (juce::Graphics& g, juce::Rectangle<float> area, double total)
+    {
+        for (int i = 0; i < machine->getStateCount(); ++i)
+        {
+            auto segment = sectionBounds (area, total, i).reduced (0.0f, 1.0f);
+            const auto colour = graphColour (i);
+            if (const auto* child = machine->childMachine (i))
+            {
+                drawNestedMachineSummary (g, segment.reduced (5.0f, 2.0f), *child, colour, i == machine->selectedState);
+            }
+            else if (segment.getWidth() > 28.0f)
+            {
+                g.setColour (hairline().withAlpha (0.14f));
+                g.fillRoundedRectangle (segment.reduced (5.0f, segment.getHeight() * 0.36f), 3.0f);
+            }
+        }
+    }
+
+    void drawLanesRow (juce::Graphics& g, juce::Rectangle<float> area, double total)
+    {
+        for (int i = 0; i < machine->getStateCount(); ++i)
+        {
+            auto segment = sectionBounds (area, total, i).reduced (5.0f, 2.0f);
+            drawLaneSummary (g, segment, machine->state (i), graphColour (i), i == machine->selectedState);
+        }
     }
 
     void drawSectionText (juce::Graphics& g,
@@ -1678,23 +1785,24 @@ private:
             return;
 
         g.setColour (parentColour.withAlpha (parentSelected ? 0.18f : 0.10f));
-        g.fillRoundedRectangle (area, 3.0f);
+        g.fillRoundedRectangle (area, 5.0f);
         g.setColour (parentColour.withAlpha (parentSelected ? 0.62f : 0.36f));
-        g.drawRoundedRectangle (area.reduced (0.5f), 3.0f, 0.7f);
+        g.drawRoundedRectangle (area.reduced (0.5f), 5.0f, 0.8f);
 
-        auto x = area.getX() + 2.0f;
-        const auto gap = 2.0f;
-        const auto cellWidth = juce::jmax (3.0f, (area.getWidth() - 4.0f - gap * static_cast<float> (child.getStateCount() - 1))
+        auto inner = area.reduced (5.0f, 5.0f);
+        auto x = inner.getX();
+        const auto gap = 3.0f;
+        const auto cellWidth = juce::jmax (8.0f, (inner.getWidth() - gap * static_cast<float> (child.getStateCount() - 1))
                                                   / static_cast<float> (child.getStateCount()));
         for (int i = 0; i < child.getStateCount(); ++i)
         {
-            auto cell = juce::Rectangle<float> (x, area.getY() + 2.0f, cellWidth, area.getHeight() - 4.0f);
+            auto cell = juce::Rectangle<float> (x, inner.getY(), cellWidth, inner.getHeight());
             const auto childColour = graphColour (i, 2);
             const auto childSelected = i == child.selectedState;
             g.setColour (rowFill().interpolatedWith (childColour, childSelected ? 0.30f : 0.16f).withAlpha (0.92f));
-            g.fillRoundedRectangle (cell, 2.0f);
+            g.fillRoundedRectangle (cell, 3.0f);
             g.setColour (childSelected ? childColour.brighter (0.10f).withAlpha (0.95f) : childColour.withAlpha (0.50f));
-            g.drawRoundedRectangle (cell.reduced (0.25f), 2.0f, childSelected ? 1.0f : 0.55f);
+            g.drawRoundedRectangle (cell.reduced (0.25f), 3.0f, childSelected ? 1.1f : 0.6f);
 
             if (const auto* grandchild = child.childMachine (i))
             {
@@ -1704,10 +1812,10 @@ private:
                 juce::ignoreUnused (grandchild);
             }
 
-            if (cellWidth > 24.0f)
+            if (cellWidth > 22.0f)
             {
-                g.setFont (juce::FontOptions (7.5f, juce::Font::bold));
-                g.setColour (ink().withAlpha (childSelected ? 0.80f : 0.46f));
+                g.setFont (juce::FontOptions (9.0f, juce::Font::bold));
+                g.setColour (ink().withAlpha (childSelected ? 0.82f : 0.52f));
                 g.drawFittedText (juce::String (i + 1), cell.toNearestInt().reduced (1, 0), juce::Justification::centred, 1);
             }
             x += cellWidth + gap;
@@ -1724,12 +1832,19 @@ private:
             return;
 
         g.setColour (juce::Colour (0xff0d1015).withAlpha (selected ? 0.70f : 0.46f));
-        g.fillRoundedRectangle (area, 3.0f);
+        g.fillRoundedRectangle (area, 5.0f);
 
-        auto x = area.getX() + 5.0f;
-        const auto dotRadius = 3.0f;
+        auto laneTrack = area.reduced (8.0f, juce::jmax (5.0f, area.getHeight() * 0.30f));
+        const auto countText = juce::String (state.lanes.size()) + (state.lanes.size() == 1 ? " lane" : " lanes");
+        if (area.getWidth() > 92.0f)
+            laneTrack.removeFromRight (52.0f);
+
+        auto x = laneTrack.getX();
+        const auto gap = 3.0f;
         const auto maxDots = juce::jlimit (1, static_cast<int> (state.lanes.size()),
-                                           juce::jmax (1, juce::roundToInt ((area.getWidth() - 10.0f) / 11.0f)));
+                                           juce::jmax (1, juce::roundToInt (laneTrack.getWidth() / 17.0f)));
+        const auto chipWidth = juce::jmax (9.0f, juce::jmin (22.0f, (laneTrack.getWidth() - gap * static_cast<float> (maxDots - 1))
+                                                                  / static_cast<float> (maxDots)));
         for (int i = 0; i < maxDots; ++i)
         {
             const auto& lane = state.lanes[static_cast<size_t> (i)];
@@ -1738,45 +1853,98 @@ private:
                 laneColour = mutedInk().withAlpha (0.42f);
 
             g.setColour (laneColour.withAlpha (lane.solo ? 1.0f : 0.86f));
-            g.fillEllipse (x, area.getCentreY() - dotRadius, dotRadius * 2.0f, dotRadius * 2.0f);
+            auto chip = juce::Rectangle<float> (x, laneTrack.getY(), chipWidth, laneTrack.getHeight());
+            g.fillRoundedRectangle (chip, 3.0f);
             if (lane.frozen)
             {
                 g.setColour (ink().withAlpha (0.58f));
-                g.drawEllipse (x - 1.0f, area.getCentreY() - dotRadius - 1.0f, dotRadius * 2.0f + 2.0f, dotRadius * 2.0f + 2.0f, 0.65f);
+                g.drawRoundedRectangle (chip.reduced (0.6f), 3.0f, 0.7f);
             }
-            x += 11.0f;
+            x += chipWidth + gap;
         }
 
-        if (area.getWidth() > 78.0f)
+        if (area.getWidth() > 92.0f)
         {
-            const auto text = juce::String (state.lanes.size()) + (state.lanes.size() == 1 ? " lane" : " lanes");
             g.setColour (mutedInk().withAlpha (selected ? 0.76f : 0.54f));
-            g.setFont (juce::FontOptions (8.6f, juce::Font::bold));
-            g.drawFittedText (text, area.toNearestInt().removeFromRight (54).reduced (2, 0),
+            g.setFont (juce::FontOptions (10.0f, juce::Font::bold));
+            g.drawFittedText (countText, area.toNearestInt().removeFromRight (58).reduced (2, 0),
                               juce::Justification::centredRight, 1);
         }
     }
 
     void drawRuler (juce::Graphics& g, juce::Rectangle<float> area, double total)
     {
-        const auto baselineY = area.getBottom() - 7.0f;
+        const auto baselineY = area.getY() + 14.0f;
         g.setColour (hairline().withAlpha (0.30f));
         g.drawHorizontalLine (juce::roundToInt (baselineY), area.getX(), area.getRight());
 
-        const auto tickStep = total > 90.0 ? 30.0 : (total > 45.0 ? 15.0 : 5.0);
-        for (double tick = 0.0; tick <= total + 0.001; tick += tickStep)
+        auto x = area.getX();
+        auto bar = 1;
+        for (int i = 0; i < machine->getStateCount(); ++i)
         {
-            const auto x = area.getX() + static_cast<float> (tick / total) * area.getWidth();
-            g.setColour (hairline().withAlpha (tick == 0.0 ? 0.42f : 0.28f));
-            g.drawVerticalLine (juce::roundToInt (x), baselineY - 5.0f, baselineY + 5.0f);
+            const auto width = i == machine->getStateCount() - 1 ? area.getRight() - x
+                                                                 : area.getWidth() * static_cast<float> (stateDurationSeconds (machine->state (i)) / total);
+            const auto tickX = x;
+            g.setColour (hairline().withAlpha (i == 0 ? 0.50f : 0.30f));
+            g.drawVerticalLine (juce::roundToInt (tickX), baselineY - 5.0f, baselineY + 5.0f);
 
-            if (tick > 0.0 && area.getWidth() > 520.0f)
+            if (width > 38.0f)
             {
                 g.setFont (juce::FontOptions (8.5f));
-                g.setColour (mutedInk().withAlpha (0.42f));
-                g.drawFittedText (juce::String (tick, 0) + "s",
-                                  juce::Rectangle<int> (juce::roundToInt (x + 3.0f), juce::roundToInt (baselineY - 17.0f), 34, 12),
+                g.setColour (mutedInk().withAlpha (0.50f));
+                g.drawFittedText (juce::String (bar),
+                                  juce::Rectangle<int> (juce::roundToInt (tickX + 4.0f), juce::roundToInt (baselineY - 13.0f), 28, 11),
                                   juce::Justification::centredLeft, 1);
+            }
+
+            x += width;
+            ++bar;
+        }
+
+        g.setColour (hairline().withAlpha (0.36f));
+        g.drawVerticalLine (juce::roundToInt (area.getRight()), baselineY - 5.0f, baselineY + 5.0f);
+    }
+
+    void drawTransitionFlow (juce::Graphics& g, juce::Rectangle<float> area, double total, juce::Rectangle<float> explicitFlowArea = {})
+    {
+        if (machine == nullptr || machine->rules.empty() || machine->getStateCount() < 2)
+            return;
+
+        auto flowArea = explicitFlowArea.isEmpty() ? area.withTrimmedTop (juce::jmax (34.0f, area.getHeight() * 0.46f)).withTrimmedBottom (8.0f)
+                                                   : explicitFlowArea;
+        if (flowArea.getHeight() < 18.0f)
+            return;
+
+        for (const auto& rule : machine->rules)
+        {
+            if (rule.weight <= 0.0f || rule.from == rule.to
+                || rule.from < 0 || rule.from >= machine->getStateCount()
+                || rule.to < 0 || rule.to >= machine->getStateCount())
+                continue;
+
+            const auto from = sectionBounds (area, total, rule.from, false);
+            const auto to = sectionBounds (area, total, rule.to, false);
+            if (from.isEmpty() || to.isEmpty())
+                continue;
+
+            const auto weight = juce::jlimit (0.0f, 1.0f, rule.weight / 12.0f);
+            const auto colour = graphColour (rule.from).interpolatedWith (graphColour (rule.to), 0.45f);
+            const auto start = juce::Point<float> (from.getCentreX(), flowArea.getY() + 3.0f);
+            const auto end = juce::Point<float> (to.getCentreX(), flowArea.getY() + 3.0f);
+            const auto span = juce::jlimit (0.0f, 1.0f, std::abs (end.x - start.x) / juce::jmax (1.0f, area.getWidth()));
+            const auto drop = juce::jlimit (20.0f, flowArea.getHeight() - 2.0f,
+                                            flowArea.getHeight() * (0.46f + 0.46f * span));
+            juce::Path path;
+            path.startNewSubPath (start);
+            path.quadraticTo ((start.x + end.x) * 0.5f, flowArea.getY() + drop, end.x, end.y);
+
+            g.setColour (colour.withAlpha (0.34f + weight * 0.48f));
+            g.strokePath (path, juce::PathStrokeType (1.4f + weight * 3.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+            if (weight > 0.18f && std::abs (end.x - start.x) > 24.0f)
+            {
+                g.setColour (colour.withAlpha (0.72f));
+                g.fillEllipse (end.x - 2.2f, end.y - 2.2f, 4.4f, 4.4f);
             }
         }
     }
@@ -1812,7 +1980,7 @@ private:
         if (machine == nullptr || machine->states.empty())
             return -1;
 
-        auto area = timelineArea();
+        auto area = contentArea (timelineArea());
         if (! area.contains (point))
             return -1;
 
@@ -4709,8 +4877,7 @@ public:
         addButton (graphLayoutButton, 66);
 
         const auto horizontalDividerHeight = 8;
-        const auto arrangementVisible = arrangementViewMode > 0;
-        const auto arrangementHeight = arrangementVisible ? (arrangementViewMode == 2 ? 148 : 108) : 0;
+        const auto arrangementHeight = arrangementViewMode == 1 ? 108 : 0;
         const auto topWorkspaceHeight = 36 + arrangementHeight;
         const auto minGraphHeight = codeExpanded ? 112 : 230;
         const auto minBottomHeight = codeExpanded ? 320 : 170;
@@ -4867,7 +5034,7 @@ public:
         scriptEditor.setBounds (codePaneInner.reduced (0, 6));
 
         stateTabs.setBounds (workspace.removeFromTop (36));
-        if (arrangementVisible)
+        if (arrangementViewMode == 1)
             arrangementStrip.setBounds (workspace.removeFromTop (arrangementHeight).reduced (5, 6));
         else
             arrangementStrip.setBounds ({});
@@ -4876,7 +5043,15 @@ public:
         if (logVisible)
             logView.setBounds (graphArea.removeFromBottom (142).reduced (0, 8));
 
-        graph.setBounds (graphArea);
+        if (arrangementViewMode == 2)
+        {
+            graph.setBounds ({});
+            arrangementStrip.setBounds (graphArea);
+        }
+        else
+        {
+            graph.setBounds (graphArea);
+        }
     }
 
     bool keyPressed (const juce::KeyPress& key) override
@@ -7380,6 +7555,7 @@ private:
         topStateCountEditor.setText (juce::String (machine.getStateCount()), false);
         const auto arrangementVisible = arrangementViewMode > 0;
         arrangementStrip.setVisible (arrangementVisible);
+        graph.setVisible (arrangementViewMode != 2);
         arrangementStrip.setMachine (machine, rateSlider.getValue(), arrangementViewMode == 2, exportInProgress, exportElapsedSeconds, exportTotalSeconds);
         arrangementViewButton.setButtonText (arrangementViewMode == 2 ? "Arrange+" : "Arrange");
         arrangementViewButton.setColour (juce::TextButton::buttonColourId,
