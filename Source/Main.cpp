@@ -4877,8 +4877,8 @@ public:
         addButton (graphLayoutButton, 66);
 
         const auto horizontalDividerHeight = 8;
-        const auto arrangementHeight = arrangementViewMode == 1 ? 108 : 0;
-        const auto topWorkspaceHeight = 36 + arrangementHeight;
+        constexpr int compactArrangementHeight = 108;
+        const auto topWorkspaceHeight = 36;
         const auto minGraphHeight = codeExpanded ? 112 : 230;
         const auto minBottomHeight = codeExpanded ? 320 : 170;
         const auto maxBottomHeight = juce::jmax (minBottomHeight, area.getHeight() - topWorkspaceHeight - minGraphHeight - horizontalDividerHeight);
@@ -5034,16 +5034,18 @@ public:
         scriptEditor.setBounds (codePaneInner.reduced (0, 6));
 
         stateTabs.setBounds (workspace.removeFromTop (36));
-        if (arrangementViewMode == 1)
-            arrangementStrip.setBounds (workspace.removeFromTop (arrangementHeight).reduced (5, 6));
-        else
-            arrangementStrip.setBounds ({});
 
         auto graphArea = workspace.reduced (0, 10);
         if (logVisible)
             logView.setBounds (graphArea.removeFromBottom (142).reduced (0, 8));
 
-        if (arrangementViewMode == 2)
+        if (arrangementViewMode == 1)
+        {
+            graph.setBounds (graphArea);
+            arrangementStrip.setBounds (graphArea.removeFromTop (compactArrangementHeight).reduced (5, 6));
+            arrangementStrip.toFront (false);
+        }
+        else if (arrangementViewMode == 2)
         {
             graph.setBounds ({});
             arrangementStrip.setBounds (graphArea);
